@@ -1,0 +1,16 @@
+[Unit]
+Description=Swiftwall wallpaper daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/swiftwall daemon
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=graphical-session.target

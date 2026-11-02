@@ -1,0 +1,7 @@
+# Copy to ~/.config/swiftwall/config.toml after reviewing your local folders.
+# Replace these generic placeholders with existing local image directories.
+# Relative roots resolve against the config file's directory. ~/ is supported.
+interval_seconds = 300
+selection = "shuffle"
+folders = ["~/Pictures/Wallpapers", "/absolute/path/to/another/collection"]
+# Discovery is nonrecursive. Add each desired local folder explicitly.

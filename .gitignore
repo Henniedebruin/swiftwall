@@ -1,0 +1,78 @@
+# Rust build products; keep Cargo.lock for reproducible application builds.
+/target/
+/dist/
+/coverage/
+*.lock
+!/Cargo.lock
+
+# Private live-test/deployment evidence, screenshots and emergency backups.
+/artifacts/
+/DEPLOYMENT.md
+/LIVE_ACCEPTANCE.md
+/private/
+/local/
+/screenshots/
+/backups/
+
+# Machine-local configuration, persisted state, IPC and logs.
+/config.toml
+/config.local.toml
+*.local.toml
+state.json
+state-*.json
+install-manifest.json
+/runtime/
+/state/
+/logs/
+*.log
+*.pid
+*.sock
+*.db
+*.sqlite
+*.sqlite3
+
+# Tests generate their image fixtures; never accidentally add real wallpapers.
+*.[pP][nN][gG]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[wW][eE][bB][pP]
+*.[gG][iI][fF]
+*.[bB][mM][pP]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+
+# Credentials and environment-specific files.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+
+# Python caches, virtual environments and local tooling.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+.zed/
+.DS_Store
+
+# Editor backups, temporary files and crash dumps.
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+*.backup
+core
+core.[0-9]*
+*.core
