@@ -1,5 +1,9 @@
 # Validation and acceptance scope
 
+This page records the historical **v0.1 milestone**, not the current installation.
+See [V02.md](V02.md) for the v0.2 widget, protocol, local-deployment boundaries and
+current validation commands. Machine-specific acceptance reports are not versioned.
+
 SwiftWall v0.1 has passed isolated automated tests, an explicitly authorized live
 Omarchy acceptance test, and a production user-service deployment verification.
 This document describes the technical coverage without including personal

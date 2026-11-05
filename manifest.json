@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.henniedebruin.swiftwall",
+  "name": "SwiftWall",
+  "version": "0.2.0-dev",
+  "author": "Henniedebruin",
+  "description": "Local-first SwiftWall controls and transactional wallpaper settings.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "plugin/Service.qml",
+    "barWidget": "plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "SwiftWall",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "showCountdown": false },
+    "schema": [
+      { "key": "showCountdown", "type": "boolean", "label": "Show countdown", "defaultValue": false }
+    ]
+  }
+}

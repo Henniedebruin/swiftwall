@@ -8,6 +8,7 @@ daemon. Run it from the repository root **after** building the release binary:
 cargo build --release
 python3 scripts/benchmark.py
 python3 scripts/benchmark.py --binary target/release/swiftwall --seconds 30 --images 1000
+python3 scripts/benchmark.py --seconds 10 --images 1000 --subscribe
 ```
 
 Options:
@@ -17,11 +18,14 @@ Options:
 - `--seconds`: idle sampling duration, default `10`, inclusive range `1..120`
   (fractional seconds allowed).
 - `--images`: positive number of generated images, default `100`.
+- `--subscribe`: keep a native v0.2 event subscription open during the idle sample;
+  requires a v0.2 test binary. No heartbeat or status polling is sent during sampling.
 
 A missing or non-executable binary is rejected before creating the fixture or
 launching anything. The script never builds or automatically runs benchmarks as
 part of import, compilation, or test discovery. Its filename does not match
-`test*.py`, so installer test discovery still discovers only `test_install.py`.
+`test*.py`; portable Python test discovery does not execute benchmarks. The QML
+runner is also explicit and does not launch a Qt session merely when imported.
 
 ## Isolation and cleanup
 
