@@ -319,6 +319,13 @@ The separate `scripts/live_acceptance.py --allow-live-desktop` harness **does ch
 real wallpapers** and must not be run without fresh user approval. It uses
 `scripts/live_pointer.c` for temporary native Wayland input, not as a runtime
 SwiftWall dependency. Private live evidence is excluded under `artifacts/`.
+For an already installed service, the additional `--allow-installed-service`
+flag explicitly authorizes a temporary stop of the verified `swiftwall.service`
+and restoration of its original active state, without changing enablement or
+installation files. See [the live acceptance procedure](docs/VALIDATION.md#controlled-live-acceptance)
+for environment requirements and restoration safeguards. This harness covers the
+engine/CLI and SwiftView integration; native widget and chooser acceptance remains
+a separate manual test.
 
 For isolated tooling/tests, explicit environment overrides are available:
 `SWIFTWALL_CONFIG`, `SWIFTWALL_STATE_DIR`, `SWIFTWALL_RUNTIME_DIR`,

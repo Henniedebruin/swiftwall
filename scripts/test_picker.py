@@ -179,8 +179,10 @@ class PureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "GLib Unix signal API is unavailable"):
             picker.unix_apis(gi, glib, load)
 
-        with mock.patch.object(picker, "unix_apis",
-                               side_effect=ValueError("GLib Unix signal API is unavailable")), \
+        with mock.patch.dict(sys.modules, {
+                "gi": gi, "gi.repository": mock.Mock(Gio=mock.Mock(), GLib=glib)}), \
+                mock.patch.object(picker, "unix_apis",
+                                  side_effect=ValueError("GLib Unix signal API is unavailable")), \
                 contextlib.redirect_stdout(io.StringIO()) as stdout, \
                 contextlib.redirect_stderr(io.StringIO()) as stderr:
             status = picker.main([])

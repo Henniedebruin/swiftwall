@@ -106,8 +106,71 @@ is a bounded automated scan, not a guarantee of absence of private data. The plu
 ID was absent from the current marketplace registry when checked.
 
 The owner selected MIT licensing; the root `LICENSE` now records those terms.
-The CI checkout action is pinned to the verified v7 commit. GitHub CI and the
-marketplace submission remain pending; no public release is claimed.
+The CI checkout action is pinned to the verified v7 commit. GitHub CI subsequently
+passed as recorded below; marketplace submission remains pending. No public
+release is claimed.
+
+## Supervised native acceptance
+
+The final complete run passed after recovery from an intervening machine shutdown.
+The interrupted run was archived privately, not counted as a pass. Post-reboot
+checks verified original wallpaper, theme, installed engine/unit hashes, active
+service and enablement before retiring its stale restoration marker. The cause of
+the machine shutdown was not established by the available journal.
+
+The successful run verified startup adoption, three automatic rotations with
+visual comparisons, explicit Next/Previous, Pause/Resume, SwiftView manual changes
+both running and paused, countdown reset, accurate status, graceful shutdown and
+restoration. The report records `all_tests_passed: true`, no cleanup errors,
+unchanged source collection and successful visual restoration. The installed
+service was active/enabled afterward and the restoration guard was disarmed.
+
+The earlier SwiftView issue was an unsuitable test fixture: its sorted-first image
+exceeded SwiftView's documented 128 MiB decoded/RGBA limit. The manual integration
+scenarios now choose compatible images and wait for a successful load title.
+Automatic SwiftWall discovery is unchanged. Regression tests cover the boundary,
+insufficient compatible candidates and malformed dimension output. No pointer
+input timing change or SwiftView source change was needed.
+
+Final local Python discovery passed **408 tests**. A pure picker error-path test
+was also made independent of whether the invoking Python has GI installed; its
+injected API failure is now tested with explicit mock GI modules.
+
+Independent lifecycle review found no blocking issues in the installed-service
+harness: guardian arm-before-stop, pidfd-pinned test-daemon shutdown, serialized
+restoration and original enablement checks were reviewed. Its 52 fixture tests
+passed locally. This review does not substitute for live timing evidence.
+
+The owner separately authorized temporary wallpaper changes and installed-service
+stop/restore, then approved upgrading the owned engine/plugin with rollback.
+Installer ownership verification and both dry runs passed. The installed engine
+was verified byte-for-byte against the built binary; plugin ownership verification
+passed. Original shell configuration bytes and service enablement were preserved.
+Private rollback copies remain outside the repository. The shell was restarted to
+avoid retaining the old QML URL in its component cache.
+
+The first run exposed the old installed widget's synchronous-disconnect behaviour:
+Quickshell crashed while the service was stopped, and the visual display did not
+match the reported selected path. Restoration returned the original wallpaper and
+active/enabled service. After the owned update, three automatic selections plus
+Next/Previous passed visual comparisons, and Pause/Resume passed their timing
+checks. The test then stopped at the separate SwiftView context-menu automation
+because the expected manual selection was not observed. That earlier failed run
+was not counted as a pass; the incompatible fixture was subsequently identified
+and the corrected full run passed as recorded above. Both earlier runs restored the
+original wallpaper visually, verified service active/enabled state and collection
+integrity, and disarmed their restoration guards.
+
+Native widget observation after upgrade: the panel opened, showed a connected
+running daemon and controls, and Add folder opened the real portal folder chooser.
+Cancel closed the chooser without saving settings. This verifies opening/cancel
+on the current desktop, not every focus, selection, scaling or accessibility case.
+No fresh Quickshell crash was observed after the deferred-teardown update.
+
+Screenshots, original image backups, private paths, process details and raw reports
+remain under ignored local `artifacts/`; they are not marketplace preview assets.
+The current suite still reports visual acknowledgement as unknown in the product:
+acceptance-test screenshot comparison is external evidence, not a renderer API.
 
 ## Earlier sandbox verification, 2026-11-06
 
@@ -175,16 +238,27 @@ adds a hosted Linux job for format, Clippy, all Rust tests, locked release build
 and Python discovery. It uses read-only repository permissions, no persisted
 checkout credentials, no desktop session, and no systemd activation or real setter.
 It adds no application dependencies and installs no Omarchy/Quickshell packages.
-The checkout action is pinned to its v7 commit. Hosted execution remains pending.
-Optional Qt/Quickshell/Gio checks can skip when the runner lacks those tools;
-hosted CI is not native-widget acceptance. A separate Rust 1.89.0 job checks the
-documented minimum against locked dependencies; the equivalent check passed locally.
+The checkout action is pinned to its v7 commit. GitHub CI passed for
+`1cbc7c06ef18e2c31fb7758543d8f09ee8ac0b63` on both push and pull-request events.
+The Linux run passed Rust formatting, Clippy, tests and release build. Python
+reported 358 tests with 2 explicit optional skips: Quickshell picker lifecycle and
+Qt QML service hardening were unavailable on the hosted runner; both were exercised
+locally. A separate Rust 1.89.0 job passed the documented minimum check.
+Hosted CI is not native-widget acceptance. CI evidence:
+<https://github.com/Henniedebruin/swiftwall/actions/runs/42295890005>.
+
+The first hosted run exposed older GI namespaces without `GLibUnix.signal_add`.
+The picker now requires the namespace version before importing and selects signal
+and fd APIs by callable capability, independently falling back to legacy GLib
+methods. Four regression tests and a 31-test local picker run passed; missing APIs
+produce clean JSON errors rather than tracebacks. The initial workflow context
+error was fixed and verified with actionlint 1.7.12 before the successful run.
 
 - [x] Rerun all Rust/Python/socket and picker timing tests outside the coding
   sandbox: full suites passed; retain the recorded fake-setter flake.
-- [ ] Run the real-import offscreen widget harness and independently reviewed
-  native widget/chooser acceptance for these changes. No fresh live acceptance
-  was authorized in this hardening task.
+- [x] Run the real-import offscreen widget harness, supervised engine/SwiftView
+  acceptance, and native widget/chooser open/cancel checks. Broader native focus,
+  selection and accessibility coverage remains outside the observed scope.
 - [ ] Review the stricter unit environment contract and perform an explicitly
   authorized isolated systemd rehearsal; mocks do not establish real-manager
   compatibility or close concurrent-edit races.
