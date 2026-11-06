@@ -7,6 +7,7 @@ by these userspace deadlines.
 """
 
 import json
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -49,6 +50,46 @@ class UserService:
         if result.returncode:
             raise ServiceError("manager-failure", result.stderr.strip())
         return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    def verify_environment(self, expected):
+        """Require explicit loaded unit values; systemctl's own env is irrelevant.
+
+        Deliberately narrow contract: no environment files, PAM injection or
+        pass/unset directives. Ambiguous C-escaped show output is refused rather
+        than decoded with shell rules. Never create a drop-in here.
+        """
+        properties = ("Environment", "EnvironmentFiles", "PassEnvironment", "UnsetEnvironment", "PAMName")
+        query_failed = False
+        try:
+            result = self.command(["systemctl", "--user", "show", self.unit,
+                                   *[arg for key in properties for arg in ("-p", key)]])
+        except Exception:
+            # A runner may include partial environment output in an exception.
+            query_failed = True
+        if query_failed:
+            raise ServiceError("environment-unverified", "Cannot inspect loaded unit environment")
+        values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if result.returncode or any(key not in values for key in properties):
+            raise ServiceError("environment-unverified", "Cannot inspect loaded unit environment")
+        if any(values[key] for key in properties[1:]):
+            raise ServiceError("environment-unverified", "Use explicit Environment= values; EnvironmentFiles, pass/unset and PAM are unsupported")
+        ambiguous = False
+        try:
+            if "\\" in values["Environment"]:
+                raise ValueError("escaped output")
+            entries = shlex.split(values["Environment"])
+            configured = dict(entry.split("=", 1) for entry in entries)
+            if len(configured) != len(entries):
+                raise ValueError("duplicate entries")
+        except ValueError:
+            ambiguous = True
+        if ambiguous:
+            raise ServiceError("environment-unverified", "Ambiguous unit Environment output")
+        mismatched = sorted(key for key, value in expected.items() if configured.get(key) != value)
+        unexpected = sorted(key for key in configured if key.startswith("SWIFTWALL_") and key not in expected)
+        if mismatched or unexpected:
+            # Do not echo untrusted names or values from the service environment.
+            raise ServiceError("environment-mismatch", "Required values differ or unsupported SWIFTWALL_ overrides")
 
     def stop(self):
         # Preserve enabled/disabled state. Stop waits for shutdown, within a bound.

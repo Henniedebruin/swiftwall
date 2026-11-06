@@ -8,8 +8,7 @@ import Quickshell.Io
 QtObject {
     id: root
 
-    property string socketPath: (Quickshell.env("SWIFTWALL_RUNTIME_DIR")
-                                || (Quickshell.env("XDG_RUNTIME_DIR") ? Quickshell.env("XDG_RUNTIME_DIR") + "/swiftwall" : "")) + "/control.sock"
+    property string socketPath: runtimeSocket(Quickshell.env("SWIFTWALL_RUNTIME_DIR"), Quickshell.env("XDG_RUNTIME_DIR"))
     property bool enabled: true
     property bool online: false
     property bool compatible: false
@@ -32,16 +31,30 @@ QtObject {
     property int serial: 0
     property bool stopping: false
     property bool ready: false
+    property double snapshotEpoch: 0
 
     signal requestFinished(string id, string op, var reply)
     signal snapshotReceived(var snapshot)
     signal disconnected(string reason)
 
+    function runtimeSocket(override, xdg) {
+        // An invalid explicit override must not fall back to another daemon.
+        if (override) return override.replace(/\/+$/, "") + "/control.sock"
+        return xdg ? xdg.replace(/\/+$/, "") + "/swiftwall/control.sock" : ""
+    }
+    function socketPathError(path) {
+        if (!path) return "No runtime directory. Set SWIFTWALL_RUNTIME_DIR or XDG_RUNTIME_DIR to an absolute private runtime directory."
+        if (path.charAt(0) !== "/" || path === "/control.sock" || path === "/swiftwall/control.sock"
+                || /[\x00-\x1f\x7f]/.test(path) || /\/(\.|\.\.)(\/|$)/.test(path) || byteLength(path) >= 108)
+            return "Invalid Swiftwall socket path. Check SWIFTWALL_RUNTIME_DIR / XDG_RUNTIME_DIR or the socket override: use an absolute private path without control characters or dot segments, below 108 UTF-8 bytes."
+        return ""
+    }
+
     function byteLength(text) {
         // Count UTF-8 bytes without allocating an encoded copy of an oversized frame.
-        var size = 0
-        for (var i = 0; i < text.length; ++i) {
-            var c = text.charCodeAt(i)
+        let size = 0
+        for (let i = 0; i < text.length; ++i) {
+            let c = text.charCodeAt(i)
             if (c < 128) size++
             else if (c < 2048) size += 2
             else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length
@@ -68,7 +81,7 @@ QtObject {
             && ["settings", "subscribe", "sequential"].every(function(c) { return reply.capabilities.indexOf(c) >= 0 })
     }
     function request(op, values, internal) {
-        var id = "swiftwall-" + (++serial)
+        let id = "swiftwall-" + (++serial)
         if (!internal && (!online || !compatible)) {
             notifyLater(id, op, failure("unavailable", error || "Swiftwall is offline"))
             return id
@@ -77,9 +90,9 @@ QtObject {
             notifyLater(id, op, failure("busy", "Too many queued requests"))
             return id
         }
-        var frame = { v: 1, id: id, op: op }
-        if (values) for (var key in values) frame[key] = values[key]
-        var wire = JSON.stringify(frame) + "\n"
+        let frame = { v: 1, id: id, op: op }
+        if (values) for (const key in values) frame[key] = values[key]
+        let wire = JSON.stringify(frame) + "\n"
         if (byteLength(wire) > requestLimit) {
             notifyLater(id, op, failure("frame_too_large", "Request exceeds 64 KiB"))
             return id
@@ -92,7 +105,7 @@ QtObject {
     function getSettings() { return request("getsettings") }
     function requestStatus() {
         if (activeRequest && activeRequest.op === "status") return activeRequest.id
-        for (var i = 0; i < queue.length; ++i) if (queue[i].op === "status") return queue[i].id
+        for (let i = 0; i < queue.length; ++i) if (queue[i].op === "status") return queue[i].id
         return request("status")
     }
     function next() { return request("next") }
@@ -108,18 +121,33 @@ QtObject {
         if (stopping || activeRequest || queue.length === 0 || !enabled) return
         activeRequest = queue[0]
         queue = queue.slice(1)
+        activeRequest.countdownEpoch = snapshotEpoch
+        activeRequest.countdownInstance = instance
+        activeRequest.countdownSeq = seq
         commandSocket = socketComponent.createObject(root, { eventStream: false, path: socketPath })
         commandTimeout.restart()
         commandSocket.connected = true
     }
+    function retireSocket(socket) {
+        if (!socket) return
+        // Ignore callbacks immediately, but never mutate Socket.connected or
+        // destroy the object from inside Quickshell's socket callback stack.
+        socket.retired = true
+        Qt.callLater(function() {
+            // The engine or an owning component may have deleted it meanwhile.
+            if (!socket) return
+            socket.connected = false
+            socket.destroy()
+        })
+    }
     function disposeCommand() {
         commandTimeout.stop()
-        var socket = commandSocket
+        let socket = commandSocket
         commandSocket = null
-        if (socket) { socket.retired = true; socket.connected = false; socket.destroy() }
+        retireSocket(socket)
     }
     function finish(reply) {
-        var current = activeRequest
+        let current = activeRequest
         if (!current) return
         activeRequest = null
         disposeCommand()
@@ -136,15 +164,18 @@ QtObject {
             eventsSocket.connected = true
         }
         // Active status/settings are authoritative subscription snapshots only.
-        // A targeted status response merely re-anchors the local countdown.
-        if (current.op === "status" && reply.ok && reply.status) anchorCountdown(reply.status)
+        // Separate sockets are unordered. A status reply has no snapshot seq;
+        // discard its countdown if any newer snapshot arrived after dispatch.
+        if (current.op === "status" && reply.ok && reply.status && online
+                && current.countdownEpoch === snapshotEpoch && current.countdownInstance === instance
+                && current.countdownSeq === seq && seq >= 0) anchorCountdown(reply.status)
         if (!reply.ok) error = reply.error || "Request failed"
         else error = ""
         requestFinished(current.id, current.op, reply)
         Qt.callLater(root.pump)
     }
     function anchorCountdown(value) {
-        var seconds = value.next_change_in_seconds
+        let seconds = value.next_change_in_seconds
         countdownDeadline = typeof seconds === "number" && isFinite(seconds)
             ? Date.now() + Math.max(0, seconds) * 1000 : 0
     }
@@ -159,13 +190,13 @@ QtObject {
         subscriptionTimeout.stop()
         reconnectTimer.stop()
         disposeCommand()
-        var socket = eventsSocket
+        let socket = eventsSocket
         eventsSocket = null
-        if (socket) { socket.retired = true; socket.connected = false; socket.destroy() }
-        var pending = activeRequest ? [activeRequest].concat(queue) : queue
+        retireSocket(socket)
+        let pending = activeRequest ? [activeRequest].concat(queue) : queue
         activeRequest = null
         queue = []
-        for (var i = 0; i < pending.length; ++i)
+        for (let i = 0; i < pending.length; ++i)
             notifyLater(pending[i].id, pending[i].op, failure("disconnected", message))
         stopping = false
         if (enabled && !unsupported && retry !== false) {
@@ -181,7 +212,9 @@ QtObject {
         reconnectTimer.stop()
         offline("Connecting to Swiftwall", false, false)
         seq = -1
-        if (!enabled || !socketPath || socketPath.charAt(0) !== "/") return
+        if (!enabled) return
+        let diagnostic = socketPathError(socketPath)
+        if (diagnostic) { error = diagnostic; return }
         connectionState = "connecting"
         request("hello", null, true)
     }
@@ -198,11 +231,11 @@ QtObject {
         // buffer. Bound our partial NDJSON frame before appending or JSON.parse.
         // ASCII wire data survives arbitrary chunk boundaries. Quickshell's
         // temporary readAll() allocation is outside the QML buffer limit.
-        var offset = 0
+        let offset = 0
         while (offset < chunk.length && !socket.retired) {
-            var end = chunk.indexOf("\n", offset)
-            var piece = chunk.substring(offset, end < 0 ? chunk.length : end)
-            var bytes = byteLength(piece)
+            let end = chunk.indexOf("\n", offset)
+            let piece = chunk.substring(offset, end < 0 ? chunk.length : end)
+            let bytes = byteLength(piece)
             if (socket.bufferBytes + bytes + 1 > responseLimit) {
                 offline("Response exceeds 1 MiB", false)
                 return
@@ -210,10 +243,10 @@ QtObject {
             socket.buffer += piece
             socket.bufferBytes += bytes
             if (end < 0) return
-            var line = socket.buffer
+            let line = socket.buffer
             socket.buffer = ""
             socket.bufferBytes = 0
-            var reply
+            let reply
             try { reply = JSON.parse(line) } catch (e) {
                 offline("Invalid Swiftwall response; requires Swiftwall 0.2", connectionState === "connecting")
                 return
@@ -230,6 +263,7 @@ QtObject {
                     return
                 }
                 if (instance !== reply.instance || reply.seq > seq) {
+                    snapshotEpoch++
                     instance = reply.instance
                     seq = reply.seq
                     status = reply.status
@@ -238,7 +272,7 @@ QtObject {
                     anchorCountdown(status)
                     snapshotReceived(reply)
                 }
-                var wasOnline = online
+                let wasOnline = online
                 online = true
                 connectionState = "online"
                 error = ""

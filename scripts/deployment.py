@@ -7,6 +7,7 @@ private controller/transport. Engine/plugin installers remain file-only.
 """
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -23,10 +24,64 @@ import install_support
 
 
 PLUGIN_ID = "io.github.henniedebruin.swiftwall"
+ENGINE_ENVIRONMENT = ("HOME", "SWIFTWALL_CONFIG", "SWIFTWALL_STATE_DIR",
+                      "SWIFTWALL_RUNTIME_DIR", "SWIFTWALL_BACKGROUND_LINK", "SWIFTWALL_OMARCHY_COMMAND")
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+@contextmanager
+def private_evidence_directory(path):
+    """Open without following symlinks, and secure even an existing directory."""
+    path = Path(path).absolute()
+    if path == Path("/") or ".." in path.parts:
+        raise ValueError("Unsafe evidence directory")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        if os.fstat(fd).st_uid != os.getuid():
+            raise ValueError("Evidence directory must be owned by the current user")
+        os.fchmod(fd, 0o700)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def private_evidence_log(directory, *, create, name="events.jsonl"):
+    flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+    if create:
+        flags |= os.O_CREAT
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=directory)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            raise ValueError("Evidence log must be a private, singly linked regular file")
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "a")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def private_command_output(args):
+    # Suppress all show output, regardless of property syntax. In particular,
+    # Environment may contain unrelated API credentials. Validation still gets
+    # the unmodified result in memory.
+    return Path(args[0]).name == "systemctl" and "show" in args[1:]
 
 
 class Deployment:
@@ -35,14 +90,18 @@ class Deployment:
                  readiness_timeout=10, runner=subprocess.run, activation_controller=None):
         self.home = Path(home).resolve(strict=True)
         self.env = dict(env)
+        self.engine_environment = {key: self.env[key] for key in ENGINE_ENVIRONMENT}
         self.v01_hash = v01_hash
         self.v02 = Path(v02).resolve(strict=True)
         self.v02_hash = v02_hash
         self.source = Path(plugin_source).resolve(strict=True)
         self.scripts = Path(__file__).resolve().parent
         self.backup_root = Path(backup_root)
-        self.evidence = Path(evidence)
-        self.evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.evidence = Path(evidence).absolute()
+        with private_evidence_directory(self.evidence) as directory:
+            stream = private_evidence_log(directory, create=False)
+            if stream is not None:
+                stream.close()
         if (activate is None) != (deactivate is None):
             raise ValueError("Supply both activation callbacks or neither")
         if (activate is not None and activation_controller is None
@@ -75,28 +134,46 @@ class Deployment:
         # Never infer HOME or IPC destinations from the supervising editor process.
         if Path(self.env["HOME"]) != self.home:
             raise ValueError("Explicit HOME must match installation home")
-        for path in (self.config, self.state, self.background, self.control_socket):
+        for path in (self.config, self.state, self.background, self.control_socket,
+                     Path(self.env["SWIFTWALL_OMARCHY_COMMAND"])):
             if not path.is_absolute():
                 raise ValueError("Explicit absolute configuration/state/background/socket required")
         if self.control_socket == Path(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent")) / "swiftwall/control.sock" and self.home != Path.home():
             raise ValueError("Isolated deployment must not use the production runtime socket")
 
     def record(self, event, **fields):
-        with (self.evidence / "events.jsonl").open("a") as stream:
-            stream.write(json.dumps({"event": event, **fields}) + "\n")
+        with private_evidence_directory(self.evidence) as directory:
+            with private_evidence_log(directory, create=True) as stream:
+                stream.write(json.dumps({"event": event, **fields}) + "\n")
 
     def execute(self, args, **kwargs):
         # systemctl needs the real session bus. Every engine CLI invocation gets
-        # the exact same explicit environment as its selected service.
-        kwargs["env"] = self.env if str(args[0]) == str(self.binary) else os.environ.copy()
-        result = self.runner(list(map(str, args)), **kwargs)
-        self.record("command", args=list(map(str, args)), returncode=result.returncode,
-                    stdout=result.stdout, stderr=result.stderr)
+        # the explicit environment checked against the selected service. Passing
+        # env to systemctl does NOT configure a service's execution environment.
+        args = list(map(str, args))
+        private = private_command_output(args)
+        kwargs["env"] = self.env if args[0] == str(self.binary) else os.environ.copy()
+        query_failed = False
+        try:
+            result = self.runner(args, **kwargs)
+        except Exception:
+            if not private:
+                raise
+            query_failed = True
+        if query_failed:
+            # Runner exceptions (including timeout/CalledProcessError payloads)
+            # can contain partial stdout/stderr. Never log or chain them.
+            self.record("command", args=args, output_omitted=True, outcome="query-failed")
+            raise RuntimeError("Service property query failed; output omitted")
+        output = {"output_omitted": True} if private else {"stdout": result.stdout, "stderr": result.stderr}
+        self.record("command", args=args, returncode=result.returncode, **output)
         return result
 
     def command(self, args):
         result = self.execute(args, capture_output=True, text=True, timeout=20)
         if result.returncode:
+            if private_command_output(list(map(str, args))):
+                raise RuntimeError(f"Service property query failed (exit {result.returncode}); output omitted")
             raise RuntimeError(f"Command failed (exit {result.returncode}): {args}: {result.stderr}{result.stdout}")
         return result.stdout
 
@@ -139,12 +216,30 @@ class Deployment:
         self.record("running_executable_verified", pid=pid, sha256=running_hash)
 
     def healthy(self, version, protocol=None):
+        self.service.verify_environment(self.engine_environment)
+        self.running_environment()
         reply = self.service.wait_ready(self.binary, version=version, protocol=protocol,
                                         timeout=self.timeout)
         self.socket_owner()
         self.running_executable()
         self.record("healthy", version=version, reply=reply, service=self.service.state())
         return reply
+
+    def running_environment(self):
+        pid = int(self.service.state()["MainPID"])
+        if pid <= 0:
+            raise RuntimeError("Service has no PID for environment verification")
+        raw = (Path("/proc") / str(pid) / "environ").read_bytes()
+        actual = dict(os.fsdecode(entry).split("=", 1) for entry in raw.split(b"\0") if entry)
+        if any(actual.get(key) != value for key, value in self.engine_environment.items()):
+            raise RuntimeError("Running service environment differs from explicit engine destinations")
+        if int(self.service.state()["MainPID"]) != pid:
+            raise RuntimeError("Service changed during environment verification")
+        self.record("running_environment_verified", pid=pid)
+
+    def start_service(self):
+        self.service.verify_environment(self.engine_environment)
+        self.service.start()
 
     def capture_backup(self):
         self.backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -213,6 +308,7 @@ class Deployment:
                 or (self.home / ".local/state/swiftwall/plugin-install-manifest.json").exists()
                 or (shell_config.exists() and PLUGIN_ID in shell_config.read_text())):
             raise RuntimeError("First-install coordinator refuses existing SwiftWall plugin/settings")
+        self.service.verify_environment(self.engine_environment)
         if self.activation_controller is not None:
             self.activation_controller.prepare()
         before = self.healthy("0.1.0")
@@ -231,7 +327,7 @@ class Deployment:
             unit = self.home / ".config/systemd/user/swiftwall.service"
             if unit.read_bytes() != (self.backup / "unit").read_bytes():
                 self.command(["systemctl", "--user", "daemon-reload"])
-            self.service.start()
+            self.start_service()
             reply = self.healthy("0.2.0-dev", 1)
             self.verify_recovery(reply)
             settings = json.loads(self.command([str(self.binary), "settings"]))
@@ -263,7 +359,7 @@ class Deployment:
                 if digest(self.binary) != self.v01_hash:
                     raise RuntimeError("Pre-install recovery requires manual inspection") from exc
                 if state.get("MainPID") == "0" and state.get("ActiveState") in ("inactive", "failed"):
-                    self.service.start()
+                    self.start_service()
                 self.healthy("0.1.0")
                 self.record("preinstall_recovered")
             else:
@@ -332,7 +428,7 @@ class Deployment:
         # Latest schema-1 state is intentionally retained; don't restore stale history.
         self.command(["systemctl", "--user", "daemon-reload"])
         wallpaper = os.readlink(self.background)
-        self.service.start()
+        self.start_service()
         reply = self.healthy("0.1.0")
         if os.readlink(self.background) != wallpaper:
             raise RuntimeError("Rollback startup changed wallpaper")

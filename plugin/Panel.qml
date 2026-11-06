@@ -126,15 +126,15 @@ Ui.Panel {
                     root.inlineError = (reply.code ? reply.code + ": " : "") + (reply.error || "Folder validation failed")
                     return
                 }
-                var entries = reply.folders || []
-                var paths = []
-                var messages = []
-                for (var i = 0; i < entries.length; ++i) {
-                    var folder = entries[i]
+                let entries = reply.folders || []
+                let paths = []
+                let messages = []
+                for (let i = 0; i < entries.length; ++i) {
+                    let folder = entries[i]
                     paths.push(folder.path)
                     messages.push(folder.path + ": " + folder.eligible_images + " eligible / "
                                   + folder.candidate_images + " candidates" + (folder.available ? "" : " (unavailable)"))
-                    if (folder.warnings) for (var j = 0; j < folder.warnings.length; ++j) messages.push(String(folder.warnings[j]))
+                    if (folder.warnings) for (let j = 0; j < folder.warnings.length; ++j) messages.push(String(folder.warnings[j]))
                 }
                 if (root.validationAddsFolder && paths.length > 0) draftModel.setFolders(paths)
                 root.validationSummary = messages.join("\n")
@@ -150,7 +150,7 @@ Ui.Panel {
         open: root.opened
         focusTarget: keyCatcher
         contentWidth: fittedContentWidth(Style.space(470))
-        contentHeight: fittedContentHeight(content.implicitHeight, Style.space(720))
+        contentHeight: fittedContentHeight(panelContent.implicitHeight, Style.space(720))
 
         Ui.PanelKeyCatcher {
             id: keyCatcher
@@ -171,13 +171,13 @@ Ui.Panel {
                 id: scroll
                 anchors.fill: parent
                 contentWidth: width
-                contentHeight: content.implicitHeight
+                contentHeight: panelContent.implicitHeight
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 QQC.ScrollBar.vertical: QQC.ScrollBar {}
 
                 Column {
-                    id: content
+                    id: panelContent
                     width: scroll.width
                     spacing: Style.spacing.md
                     enabled: !confirmation.opened
@@ -281,7 +281,7 @@ Ui.Panel {
                             id: folderRow
                             required property string modelData
                             required property int index
-                            width: content.width
+                            width: panelContent.width
                             spacing: Style.spacing.md
                             Text {
                                 width: Math.max(0, folderRow.width - removeButton.implicitWidth - folderRow.spacing)

@@ -44,6 +44,12 @@ user systemd manager. Starting the daemon may have its normal wallpaper effects.
 Do not run them for an isolated `--home` installation: systemctl addresses your
 live user manager, not that alternate home.
 
+The optional supervised `Deployment` coordinator has a stricter environment
+contract than these manual instructions. It verifies preconfigured loaded-unit
+`Environment=` values and the running process environment, refuses unsupported
+environment sources, and never creates automatic overrides. See
+[the coordinator contract](../docs/V02.md#installation-boundaries) before using it.
+
 Manual service commands are not transactional. If a command fails, inspect the
 live service state and resolve it manually. Installer rollback cannot undo a
 manual enable/start, restore live service settings or running processes, or

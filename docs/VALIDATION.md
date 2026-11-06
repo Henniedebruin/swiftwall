@@ -3,6 +3,8 @@
 This page records the historical **v0.1 milestone**, not the current installation.
 See [V02.md](V02.md) for the v0.2 widget, protocol, local-deployment boundaries and
 current validation commands. Machine-specific acceptance reports are not versioned.
+The separate [public-readiness review](PUBLIC_READINESS.md) records the current
+hardening checks and sandbox blockers; historical live passes are not new evidence.
 
 SwiftWall v0.1 has passed isolated automated tests, an explicitly authorized live
 Omarchy acceptance test, and a production user-service deployment verification.

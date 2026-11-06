@@ -126,8 +126,7 @@ class PreviewBundleTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(bundle.stat().st_mode), 0o700)
 
     def test_both_socket_overrides_are_literal_and_ignore_parent_environment(self):
-        runtime = self.base / 'private-"quoted"-runtime'
-        runtime.mkdir(mode=0o700)
+        runtime = self.runtime
         result = self.stage(runtime=runtime)
         literal = json.dumps(str(runtime / "control.sock"))
         shared = (result["bundle"] / "plugin/SharedService.qml").read_text()
@@ -141,9 +140,18 @@ class PreviewBundleTests(unittest.TestCase):
                          + literal + " }\n")
         for text in (shared, service):
             self.assertNotIn(self.sentinel, text)
-            self.assertNotIn("SWIFTWALL_RUNTIME_DIR", text)
+            self.assertNotIn("Quickshell.env", text)
         self.assertEqual(os.environ["SWIFTWALL_RUNTIME_DIR"], self.sentinel)
         self.assertEqual(list(runtime.iterdir()), [])
+
+    def test_quoted_socket_literals_without_filesystem_length_assumptions(self):
+        original = (self.source / "plugin/SharedService.qml").read_text()
+        socket = '/private-"quoted"-runtime/control.sock'
+        shared, service = preview_bundle.pinned_sources(original, socket)
+        literal = json.dumps(socket)
+        self.assertIn("property string socketPath: " + literal + "\n", shared)
+        self.assertEqual(service, "import QtQuick\n\nSharedService { socketPath: " + literal + " }\n")
+        self.assertNotIn("Quickshell.env", shared)
 
     def test_all_qml_identity_replacements_and_other_payload_bytes(self):
         result = self.stage()

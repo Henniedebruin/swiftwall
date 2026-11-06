@@ -19,6 +19,15 @@ import plugin_support
 PRODUCTION_ID = plugin_support.PLUGIN_ID
 
 
+def pinned_sources(shared, socket):
+    """Render literals without filesystem or socket assumptions."""
+    start = shared.index("    property string socketPath:")
+    end = shared.index("    property bool enabled:", start)
+    literal = json.dumps(str(socket))
+    return (shared[:start] + "    property string socketPath: " + literal + "\n" + shared[end:],
+            "import QtQuick\n\nSharedService { socketPath: " + literal + " }\n")
+
+
 def stage_preview(source, parent, runtime):
     """Return a fresh bundle whose component URLs have never been used here.
 
@@ -40,15 +49,15 @@ def stage_preview(source, parent, runtime):
     # Stage outside every live plugin tree, not merely outside the chosen home.
     if "/omarchy/plugins" in str(parent) or "/usr/share/omarchy" in str(parent):
         raise ValueError("Preview staging must be outside live plugin discovery")
-    socket = runtime / "control.sock"
-    if len(bytes(str(socket), "utf-8")) >= 108:
-        raise ValueError("Private Unix socket path exceeds Linux sockaddr_un limit")
     if str(runtime) == str(Path.home() / ".local/state/swiftwall"):
         raise ValueError("Not a private preview runtime")
     actual_runtime = os.environ.get("XDG_RUNTIME_DIR")
     standard_runtime = Path("/run/user") / str(os.getuid()) / "swiftwall"
     if runtime == standard_runtime or (actual_runtime and runtime == Path(actual_runtime) / "swiftwall"):
         raise ValueError("Production SwiftWall runtime is forbidden for previews")
+    socket = runtime / "control.sock"
+    if len(bytes(str(socket), "utf-8")) >= 108:
+        raise ValueError("Private Unix socket path exceeds Linux sockaddr_un limit")
     generation = plugin_support.source_generation(source)
     identity = "local.swiftwall-preview-" + uuid.uuid4().hex
     bundle = parent / identity
@@ -67,14 +76,10 @@ def stage_preview(source, parent, runtime):
         manifest["name"] = "SwiftWall isolated preview"
         (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         shared = bundle / "plugin/SharedService.qml"
-        text = shared.read_text()
-        start = text.index("    property string socketPath:")
-        end = text.index("    property bool enabled:", start)
-        shared.write_text(text[:start] + "    property string socketPath: "
-                          + json.dumps(str(socket)) + "\n" + text[end:])
+        shared_text, service_text = pinned_sources(shared.read_text(), socket)
+        shared.write_text(shared_text)
         service = bundle / "plugin/Service.qml"
-        service.write_text("import QtQuick\n\nSharedService { socketPath: "
-                           + json.dumps(str(socket)) + " }\n")
+        service.write_text(service_text)
         # Both base and entrypoint are pinned before Component.onCompleted. The
         # unique directory also gives every implicit local type a fresh URL.
         if (PRODUCTION_ID in (bundle / "plugin/BarWidget.qml").read_text()

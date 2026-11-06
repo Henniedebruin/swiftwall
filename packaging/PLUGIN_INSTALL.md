@@ -154,3 +154,14 @@ failures, no-clobber publication/recovery races, unsupported rename primitives,
 simulated cross-device preflight, locking, configuration preservation, and refusal
 to launch processes.
 No live installation or activation is part of the tests.
+
+## Distribution review
+
+File ownership and manifest validation do not establish marketplace acceptance
+or release readiness. See the [hardening results and remaining checklist](../docs/PUBLIC_READINESS.md).
+The widget now fails closed when runtime environment/overrides cannot identify a
+valid absolute Unix socket path, with a diagnostic in its connection error.
+`SWIFTWALL_RUNTIME_DIR` takes precedence over `XDG_RUNTIME_DIR`; an invalid explicit
+override does not silently select the fallback daemon. Status replies on the
+command socket cannot overwrite a countdown after a newer subscribed snapshot
+or instance was accepted.

@@ -28,7 +28,7 @@ Item {
         cancelling = false
         frame = ""
         receivedBytes = 0
-        var helper = decodeURIComponent(String(Qt.resolvedUrl("pick_folder.py")).replace(/^file:\/\//, ""))
+        let helper = decodeURIComponent(String(Qt.resolvedUrl("pick_folder.py")).replace(/^file:\/\//, ""))
         process.command = ["/usr/bin/python3", helper, "--watch-parent", String(Quickshell.processId)]
         deadline.restart()
         process.running = true
@@ -65,7 +65,7 @@ Item {
             reject("Folder picker returned a duplicate response")
             return
         }
-        var newline = data.indexOf("\n")
+        let newline = data.indexOf("\n")
         if (newline < 0) {
             if (receivedBytes >= 32768) reject("Folder picker returned an oversized unterminated response")
             else frame += data
@@ -75,10 +75,10 @@ Item {
             reject("Folder picker returned an invalid or duplicate response")
             return
         }
-        var text = frame + data.slice(0, newline)
+        let text = frame + data.slice(0, newline)
         frame = ""
         try {
-            var value = JSON.parse(text)
+            let value = JSON.parse(text)
             if (!value || value.v !== 1 || ["selected", "cancelled", "error"].indexOf(value.result) < 0
                 || (value.result === "selected" && (typeof value.url !== "string" || !value.url.startsWith("file:///")))
                 || (value.result === "error" && typeof value.message !== "string")) throw new Error("Invalid response")

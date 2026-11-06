@@ -63,7 +63,7 @@ def main():
         for (level, category), count in sorted(counts.items()):
             print(f"{level}: {category}: {count}")
         print("INFO: dynamic host/Loader/theme properties and the missing socket-enum lint metadata remain informational;")
-        print("      actual socket/error handling is separately exercised by the offscreen runtime harness.")
+        print("      run the separate offscreen runtime harness to verify actual socket/error handling.")
     return 0
 
 

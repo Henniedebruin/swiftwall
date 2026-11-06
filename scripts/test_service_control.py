@@ -6,6 +6,7 @@ session environment and a fake setter; no real service manager is executed.
 
 import copy
 import json
+import shlex
 import os
 import stat
 import struct
@@ -26,6 +27,49 @@ UNIT = "swiftwall.service"
 # Deliberately nonexistent: the injected runner must never execute this path.
 BINARY = Path("/nonexistent/swiftwall-test-binary")
 VERSION = "0.2.0"
+
+
+class EnvironmentContractTests(unittest.TestCase):
+    def check(self, expected=None, **changes):
+        expected = expected or {"HOME": "/private/home", "SWIFTWALL_CONFIG": "/private/config with spaces",
+                                "SWIFTWALL_RUNTIME_DIR": "/private/run"}
+        fields = dict(Environment=shlex.join([key + "=" + value for key, value in expected.items()]),
+                      EnvironmentFiles="", PassEnvironment="", UnsetEnvironment="", PAMName="")
+        fields.update(changes)
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0,
+                           "\n".join(key + "=" + value for key, value in fields.items()), ""))
+        service = control.UserService(UNIT, runner=runner)
+        service.verify_environment(expected)
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(runner.call_args.args[0][:4], ["systemctl", "--user", "show", UNIT])
+
+    def test_matching_explicit_environment(self):
+        self.check()
+
+    def test_missing_or_mismatched_values(self):
+        for environment in ("", "HOME=/elsewhere", "HOME=/private/home SWIFTWALL_CONFIG=/wrong"):
+            with self.subTest(environment=environment), self.assertRaisesRegex(control.ServiceError, "environment-mismatch"):
+                self.check(Environment=environment)
+
+    def test_dynamic_environment_sources_are_refused(self):
+        for key in ("EnvironmentFiles", "PassEnvironment", "UnsetEnvironment", "PAMName"):
+            with self.subTest(key=key), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
+                self.check(**{key: "/private/example"})
+
+    def test_ambiguous_output_is_refused(self):
+        for environment in ('HOME="unterminated', 'HOME=/one HOME=/two', 'HOME=/escaped\\x20path', 'invalid'):
+            with self.subTest(environment=environment), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
+                self.check(Environment=environment)
+
+    def test_unexpected_swiftwall_override_is_refused(self):
+        with self.assertRaisesRegex(control.ServiceError, "environment-mismatch.*SWIFTWALL_"):
+            self.check(expected={"HOME": "/private/home"}, Environment="HOME=/private/home SWIFTWALL_OTHER=/bad")
+
+    def test_manager_error_and_missing_properties_fail_closed(self):
+        for code, stdout in ((1, ""), (0, "Environment=HOME=/private/home")):
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], code, stdout, ""))
+            with self.subTest(code=code), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
+                control.UserService(UNIT, runner=runner).verify_environment({"HOME": "/private/home"})
 
 
 def probe(binary=BINARY, protocol=1):

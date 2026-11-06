@@ -35,15 +35,15 @@ Ui.BarWidget {
         if (countdownVisible && service && service.online) service.requestStatus()
     }
     function setShowCountdown(value) {
-        var entry = { id: moduleName }
-        for (var key in settings) if (key !== "id") entry[key] = settings[key]
+        let entry = { id: moduleName }
+        for (const key in settings) if (key !== "id") entry[key] = settings[key]
         entry.showCountdown = value
         settings = entry
         if (bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
             bar.shell.updateEntryInline(moduleName, entry)
     }
     function injectPanel() {
-        var target = panelLoader.item
+        let target = panelLoader.item
         if (!target) return
         target.bar = bar
         target.anchorItem = button
@@ -65,7 +65,7 @@ Ui.BarWidget {
         repeat: true
         running: root.ticking
         onTriggered: {
-            var current = Date.now()
+            let current = Date.now()
             if (Math.abs(current - root.now - 1000) > 5000 && root.service) root.service.requestStatus()
             root.now = current
         }
@@ -88,7 +88,7 @@ Ui.BarWidget {
         tooltipText: {
             if (!root.service) return "Swiftwall · Service unavailable"
             if (!root.service.online) return "Swiftwall · " + (root.service.error || root.service.connectionState)
-            var lines = ["Swiftwall · " + root.stateText]
+            let lines = ["Swiftwall · " + root.stateText]
             if (!root.paused && !root.protectivelySuspended && root.countdownVisible && root.service.countdownDeadline > 0)
                 lines.push("Next wallpaper in " + root.countdownText)
             else if (root.service.status.no_schedule_reason)

@@ -28,7 +28,8 @@ import uuid
 import zlib
 
 sys.dont_write_bytecode = True
-from deployment import Deployment, digest
+from deployment import (Deployment, digest, private_command_output,
+                        private_evidence_directory, private_evidence_log)
 from service_control import ServiceError
 import plugin_activation
 
@@ -76,16 +77,8 @@ def unit_quote(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
-def env_quote(value):
-    # EnvironmentFile values use their own double-quote/backslash rules, not
-    # shell expansion or unit specifiers: literal dollars and % stay unchanged.
-    value = str(value)
-    require(not any(c in value for c in "\n\r\0"), "unsafe environment value")
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 def simple_unit_path(value):
-    # EnvironmentFile and WorkingDirectory take paths, not ExecStart words.
+    # WorkingDirectory takes a path, not ExecStart words.
     # Our /tmp fixture paths need neither quoting nor specifier expansion.
     value = str(value)
     require(re.fullmatch(r"/tmp/swr-[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*", value)
@@ -95,7 +88,7 @@ def simple_unit_path(value):
 
 
 def write_launcher(root):
-    """Embed expectations independently of EnvironmentFile; never infer defaults."""
+    """Embed expectations independently of unit directives; never infer defaults."""
     root = Path(simple_unit_path(root))
     launcher = root / "launch.py"
     expected = engine_environment(root)
@@ -144,8 +137,9 @@ os.execve(str(binary), [str(binary), "daemon"], expected)
 def isolation_dropin(root):
     root = Path(simple_unit_path(root))
     return ("[Service]\nExecStart=\nExecStart=/usr/bin/python3 " + unit_quote(root / "launch.py") + "\n"
-            "EnvironmentFile=\nEnvironmentFile=" + simple_unit_path(root / "engine.env") + "\n"
-            "UnsetEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS\n"
+            "EnvironmentFile=\nEnvironment=\n"
+            + "".join("Environment=" + unit_quote(key + "=" + value) + "\n"
+                      for key, value in engine_environment(root).items()) +
             "TimeoutStartSec=10\nTimeoutStopSec=10\nUMask=0077\n"
             "WorkingDirectory=" + simple_unit_path(root / "home") + "\n")
 
@@ -196,8 +190,9 @@ class Rehearsal:
 
 
     def record(self, event, **fields):
-        with (self.evidence / "trace.jsonl").open("a") as stream:
-            stream.write(json.dumps({"time": time.time(), "event": event, **fields}) + "\n")
+        with private_evidence_directory(self.evidence) as directory:
+            with private_evidence_log(directory, create=True, name="trace.jsonl") as stream:
+                stream.write(json.dumps({"time": time.time(), "event": event, **fields}) + "\n")
 
     def installer_commands(self):
         engine = ["python3", "-B", str(SCRIPTS / "install.py"), "--home", str(self.home)]
@@ -308,7 +303,8 @@ os._exit(74)
                     allowed = extra == ["--runtime"]
                 elif action == "show":
                     properties = {"LoadState", "ActiveState", "SubState", "MainPID",
-                                  "NRestarts", "Result", "UnitFileState"}
+                                  "NRestarts", "Result", "UnitFileState", "Environment",
+                                  "EnvironmentFiles", "PassEnvironment", "UnsetEnvironment", "PAMName"}
                     allowed = len(extra) % 2 == 0 and all(
                         extra[i] == "-p" and extra[i + 1] in properties
                         for i in range(0, len(extra), 2))
@@ -326,27 +322,40 @@ os._exit(74)
                       capture_output=True, text=True)
         kwargs["timeout"] = min(kwargs.get("timeout", 20), 35)
         self.record("exec", argv=argv, environment="manager" if is_manager else "isolated")
+        private = private_command_output(argv)
+        query_failed = False
         try:
             result = subprocess.run(argv, **kwargs)
         except BaseException as exc:
-            fields = {}
-            if isinstance(exc, subprocess.TimeoutExpired):
-                for key in ("stdout", "stderr"):
-                    output = getattr(exc, key)
-                    fields[key] = output.decode(errors="replace") if isinstance(output, bytes) else output
-            self.record("exec_exception", argv=argv, error=repr(exc), **fields)
-            raise
+            if private:
+                if not isinstance(exc, Exception):
+                    self.record("exec_exception", argv=argv, output_omitted=True, error="Service property query interrupted")
+                    raise
+                query_failed = True
+            else:
+                fields = {}
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    for key in ("stdout", "stderr"):
+                        output = getattr(exc, key)
+                        fields[key] = output.decode(errors="replace") if isinstance(output, bytes) else output
+                self.record("exec_exception", argv=argv, error=repr(exc), **fields)
+                raise
         finally:
             # A failed wrapper or lost reply does NOT mean installation failed to
             # commit. Re-read the actual installed template even on timeout/error.
             if engine_mutation:
                 self.sync_runtime_unit()
-        self.record("result", argv=argv, returncode=result.returncode,
-                    stdout=result.stdout, stderr=result.stderr)
+        if query_failed:
+            self.record("exec_exception", argv=argv, output_omitted=True, error="Service property query failed")
+            raise RuntimeError("Service property query failed; output omitted")
+        output = {"output_omitted": True} if private else {"stdout": result.stdout, "stderr": result.stderr}
+        self.record("result", argv=argv, returncode=result.returncode, **output)
         return result
 
     def command(self, argv):
         result = self.raw(argv)
+        if result.returncode and private_command_output(list(map(str, argv))):
+            raise RuntimeError("Service property query failed; output omitted")
         require(result.returncode == 0, f"Command failed: {argv}: {result.stderr}")
         return result.stdout
 
@@ -605,9 +614,6 @@ if args[1] == "enable" and state["case"] == "activation-timeout-complete":
         self.owned.append(self.drop_dir)
 
         self.target_path.write_text("[Unit]\nDescription=Private Swiftwall rehearsal target\n")
-        envfile = self.root / "engine.env"
-        envfile.write_text("".join(f"{key}={env_quote(value)}\n" for key, value in self.env.items()))
-        envfile.chmod(0o600)
         write_launcher(self.root)
         (self.drop_dir / "10-isolation.conf").write_text(isolation_dropin(self.root))
         self.sync_runtime_unit()
@@ -623,7 +629,7 @@ if args[1] == "enable" and state["case"] == "activation-timeout-complete":
             activate=lambda: self.activation(True), deactivate=lambda: self.activation(False),
             readiness_timeout=4, runner=self.runner,
             activation_controller=self.activation_controller)
-        self.deployment.service.start()
+        self.deployment.start_service()
         self.deployment.healthy("0.1.0")
         for op in ("next", "next", "pause"):
             reply = json.loads(self.command([self.binary, op]))

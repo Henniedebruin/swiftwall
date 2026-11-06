@@ -308,9 +308,13 @@ class IntegrationTests(unittest.TestCase):
 
     def test_unresponsive_close_is_bounded(self):
         self.start_fake("ignore_close")
+        process = self.launch("--timeout", "0.2")
+        # Measure the bounded portal/Close path after startup, not Python/Gio
+        # import and private-bus scheduling. Production Close has a 500ms guard.
+        self.wait_event("open")
         start = time.monotonic()
-        self.result(self.launch("--timeout", "0.2"), "error", timeout=3)
-        self.assertLess(time.monotonic() - start, 2)
+        self.result(process, "error", timeout=2)
+        self.assertLess(time.monotonic() - start, 1.5)
         self.wait_event("close")
 
     def test_absent_portal_is_error_without_activation(self):

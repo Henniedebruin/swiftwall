@@ -4,11 +4,13 @@ import argparse
 
 import json
 import os
+import shlex
 from pathlib import Path
 import stat
 import subprocess
 import tempfile
 import time
+import traceback
 import unittest
 from unittest.mock import Mock, patch
 
@@ -70,6 +72,51 @@ class HarnessSafetyTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"], self.fixture.manager_env)
         self.assertFalse(any(key.startswith("SWIFTWALL_") for key in self.fixture.manager_env))
 
+    def test_environment_queries_are_private_through_rehearsal_and_coordinator(self):
+        fixture = self.fixture
+        fixture.home.mkdir()
+        fixture.args.v02.write_bytes(b"private file-only input; never executed")
+        secret = "unrelated-api-canary-nested-runner"
+        environment = shlex.join([key + "=" + value for key, value in fixture.env.items()]
+                                 + ["UNRELATED_API_SECRET=" + secret])
+        output = "Environment=" + environment + "\nEnvironmentFiles=\nPassEnvironment=\nUnsetEnvironment=\nPAMName=\n"
+        trace = fixture.evidence / "trace.jsonl"
+        trace.write_text('{"event":"previous"}\n')
+        trace.chmod(0o666)
+        fixture.evidence.chmod(0o777)
+        deployment = coordinator.Deployment(
+            home=fixture.home, unit=fixture.unit, env=fixture.env, v01_hash="unused",
+            v02=fixture.args.v02, v02_hash=coordinator.digest(fixture.args.v02),
+            plugin_source=self.root, backup_root=self.root / "backups",
+            evidence=self.root / "coordinator", activate=Mock(), deactivate=Mock(), runner=fixture.runner)
+        for case, code, stdout, error in (
+                ("success", 0, output, None), ("failure", 1, output, None),
+                ("malformed", 0, output.replace("Environment=", 'Environment="', 1), None),
+                ("timeout", 0, "", subprocess.TimeoutExpired("systemctl", 10, output=secret, stderr=secret)),
+                ("runner-error", 0, "", ValueError(secret))):
+            with self.subTest(case=case), patch.object(subprocess, "Popen") as popen, \
+                    patch.object(rehearsal.subprocess, "run", side_effect=error,
+                                 return_value=subprocess.CompletedProcess([], code, stdout, secret)) as run:
+                if case == "success":
+                    deployment.service.verify_environment(deployment.engine_environment)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "environment-unverified") as caught:
+                        deployment.start_service()
+                    self.assertNotIn(secret, "".join(traceback.format_exception(caught.exception)))
+                    self.assertIsNone(caught.exception.__context__)
+                run.assert_called_once()
+                popen.assert_not_called()
+                for log in (trace, deployment.evidence / "events.jsonl"):
+                    self.assertNotIn(secret, log.read_text())
+                    self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+                    self.assertEqual(stat.S_IMODE(log.parent.stat().st_mode), 0o700)
+        # Its direct command failure must also omit captured output in errors.
+        with patch.object(rehearsal.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 1, output, secret)):
+            with self.assertRaisesRegex(RuntimeError, "output omitted") as caught:
+                fixture.command(["systemctl", "--user", "show", fixture.unit, "-p", "Environment"])
+        self.assertNotIn(secret, str(caught.exception))
+
     def test_ipc_fault_changes_actual_request_once_not_output(self):
         self.fixture.case = "ipc"
         request = [str(self.fixture.binary), "request", json.dumps({"v": 1, "op": "status"})]
@@ -128,7 +175,6 @@ class HarnessSafetyTests(unittest.TestCase):
 
     def test_unit_escaping_is_not_shell_quoting(self):
         self.assertEqual(rehearsal.unit_quote('/a b/100%"\\'), '"/a b/100%%\\"\\\\"')
-        self.assertEqual(rehearsal.env_quote("100%"), '"100%"')
         with self.assertRaises(RuntimeError):
             rehearsal.unit_quote("/path\nExecStart=bad")
 
@@ -151,14 +197,16 @@ class HarnessSafetyTests(unittest.TestCase):
         fixture = self.fixture
         dropin = rehearsal.isolation_dropin(fixture.root)
         lines = dropin.splitlines()
-        self.assertIn("EnvironmentFile=" + str(fixture.root / "engine.env"), lines)
+        self.assertFalse(any(line.startswith("EnvironmentFile=") and line != "EnvironmentFile=" for line in lines))
         self.assertIn("WorkingDirectory=" + str(fixture.home), lines)
         self.assertIn('ExecStart=/usr/bin/python3 "' + str(fixture.root / "launch.py") + '"', lines)
         self.assertIn("EnvironmentFile=", lines)
-        unset = next(line for line in lines if line.startswith("UnsetEnvironment="))
-        self.assertEqual(unset.split("=", 1)[1].split(),
-                         ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"])
-        self.assertFalse(set(unset.split("=", 1)[1].split()) & fixture.env.keys())
+        self.assertIn("Environment=", lines)
+        for key, value in fixture.env.items():
+            self.assertIn("Environment=" + rehearsal.unit_quote(key + "=" + value), lines)
+        # The execve launcher, independently tested below, removes all inherited
+        # desktop/session values before executing the engine.
+        self.assertFalse(any(line.startswith("UnsetEnvironment=") for line in lines))
         for path in ("/tmp/swr-safe name", "/tmp/swr-safe%", '/tmp/swr-safe"',
                      "/tmp/swr-safe/../outside", "/tmp/swr-safe\n", "/outside/swr-safe"):
             with self.subTest(path=path), self.assertRaises(RuntimeError):
@@ -205,12 +253,32 @@ class HarnessSafetyTests(unittest.TestCase):
         self.assertIn("rehearsal isolation guard:", result.stderr)
         self.assertFalse(self.marker.exists())
 
-    def test_environment_file_quoting_preserves_literals(self):
-        # EnvironmentFile double quotes do not expand dollars, backticks or %.
-        self.assertEqual(rehearsal.env_quote('a$HOME`literal`%"\\z'),
-                         '"a$HOME`literal`%\\"\\\\z"')
+    def test_environment_directive_quoting_preserves_literals(self):
+        # Environment= values are not shell words; percent specifiers need escaping.
+        self.assertEqual(rehearsal.unit_quote('a$HOME`literal`%"\\z'),
+                         '"a$HOME`literal`%%\\"\\\\z"')
         with self.assertRaises(RuntimeError):
-            rehearsal.env_quote("bad\nvalue")
+            rehearsal.unit_quote("bad\nvalue")
+
+    def test_setup_declares_environment_before_any_manager_operation(self):
+        fixture = self.fixture
+        fixture.args.v01.write_bytes(b"private file-only engine input")
+        fixture.args.plugin_source = rehearsal.SCRIPTS.parent
+
+        def install_only(argv):
+            self.assertEqual(argv[:3], ["python3", "-B", str(rehearsal.SCRIPTS / "install.py")])
+            coordinator.install_support.install(fixture.home, fixture.args.v01)
+
+        with patch.object(fixture, "command", side_effect=install_only), \
+                patch.object(fixture, "sync_runtime_unit"), \
+                patch.object(fixture, "ctl", side_effect=RuntimeError("stop before manager")) as ctl, \
+                patch.object(rehearsal, "V01", coordinator.digest(fixture.args.v01)):
+            with self.assertRaisesRegex(RuntimeError, "stop before manager"):
+                fixture.setup()
+        ctl.assert_called_once_with("start", fixture.target)
+        self.assertFalse((fixture.root / "engine.env").exists())
+        self.assertEqual((fixture.drop_dir / "10-isolation.conf").read_text(), rehearsal.isolation_dropin(fixture.root))
+        self.assertTrue((fixture.root / "launch.py").is_file())
 
     def reserve_runtime(self):
         fixture = self.fixture
@@ -489,6 +557,8 @@ class HarnessSafetyTests(unittest.TestCase):
         deployment.v01_hash = rehearsal.V01
         deployment.v02_hash = rehearsal.V02
         deployment.timeout = 1
+        deployment.engine_environment = {key: self.fixture.env[key] for key in coordinator.ENGINE_ENVIRONMENT}
+        deployment.running_environment = Mock()
         deployment.service = Mock()
         deployment.service.wait_ready.return_value = {"ok": True, "status": {}}
         deployment.service.state.return_value = {"MainPID": "12345", "ActiveState": "active",
@@ -654,6 +724,198 @@ class HarnessSafetyTests(unittest.TestCase):
         self.assertTrue(rehearsal.png().startswith(b"\x89PNG\r\n\x1a\n"))
 
 
+class CoordinatorEvidenceTests(unittest.TestCase):
+    """Exercise the real UserService -> Deployment.execute -> record boundary."""
+
+    secret = "unrelated-api-canary-8b413ef2"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        home = self.root / "home"
+        home.mkdir()
+        artifact = self.root / "v02"
+        artifact.write_bytes(b"never executed")
+        self.runner = Mock()
+        self.options = dict(home=home, unit="private-fixture.service",
+                            env=rehearsal.engine_environment(self.root), v01_hash="unused",
+                            v02=artifact, v02_hash=coordinator.digest(artifact),
+                            plugin_source=self.root, backup_root=self.root / "backup",
+                            evidence=self.root / "evidence", activate=Mock(), deactivate=Mock(),
+                            runner=self.runner)
+        guard = patch.object(subprocess, "Popen", side_effect=AssertionError("Live process forbidden"))
+        self.popen = guard.start()
+        self.addCleanup(guard.stop)
+        self.addCleanup(self.popen.assert_not_called)
+
+    def response(self, **changes):
+        values = {key: self.options["env"][key] for key in coordinator.ENGINE_ENVIRONMENT}
+        values["UNRELATED_API_SECRET"] = self.secret
+        fields = dict(Environment=shlex.join([key + "=" + value for key, value in values.items()]),
+                      EnvironmentFiles="", PassEnvironment="", UnsetEnvironment="", PAMName="")
+        fields.update(changes)
+        return "\n".join(key + "=" + value for key, value in fields.items())
+
+    def assert_private(self, deployment):
+        log = deployment.evidence / "events.jsonl"
+        self.assertEqual(stat.S_IMODE(deployment.evidence.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        for path in deployment.evidence.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(self.secret, path.read_text())
+        events = [json.loads(line) for line in log.read_text().splitlines()]
+        command = events[-1]
+        self.assertEqual(command["event"], "command")
+        self.assertTrue(command["output_omitted"])
+        self.assertNotIn("stdout", command)
+        self.assertNotIn("stderr", command)
+        return command
+
+    def test_success_keeps_validation_and_suppresses_both_streams(self):
+        self.runner.return_value = subprocess.CompletedProcess([], 0, self.response(), self.secret)
+        deployment = coordinator.Deployment(**self.options)
+        deployment.service.verify_environment(deployment.engine_environment)
+        self.assertEqual(self.assert_private(deployment)["returncode"], 0)
+        self.runner.assert_called_once()
+        self.assertIn("Environment", self.runner.call_args.args[0])
+
+    def test_failed_and_malformed_queries_never_leak_or_start(self):
+        for case, code, output in (
+                ("manager-failure", 1, self.response()),
+                ("missing-property", 0, "Environment=UNRELATED_API_SECRET=" + self.secret),
+                ("malformed-entry", 0, self.response(Environment="UNRELATED_API_SECRET=" + self.secret + " invalid")),
+                ("unclosed-quote", 0, self.response(Environment='UNRELATED_API_SECRET="' + self.secret)),
+                ("escaped", 0, self.response(Environment="UNRELATED_API_SECRET=" + self.secret + "\\x20")),
+                ("duplicate", 0, self.response(Environment="UNRELATED_API_SECRET=" + self.secret + " A=1 A=2")),
+                ("mismatch", 0, self.response(Environment="HOME=" + self.secret)),
+                ("unknown-key", 0, self.response(Environment="SWIFTWALL_" + self.secret + "=value")),
+                ("dynamic-source", 0, self.response(EnvironmentFiles=self.secret))):
+            with self.subTest(case=case):
+                self.runner.reset_mock()
+                self.runner.return_value = subprocess.CompletedProcess([], code, output, self.secret)
+                deployment = coordinator.Deployment(**self.options)
+                with self.assertRaisesRegex(RuntimeError, "environment-") as caught:
+                    deployment.start_service()
+                rendered = "".join(traceback.format_exception(caught.exception))
+                self.assertNotIn(self.secret, rendered)
+                self.assertNotIn(self.secret, repr(caught.exception))
+                self.runner.assert_called_once()  # no state probe or start after refusal
+                self.assertEqual(self.assert_private(deployment)["returncode"], code)
+
+    def test_runner_exceptions_and_partial_output_are_suppressed(self):
+        for error in (subprocess.TimeoutExpired("systemctl", 10, output=self.secret, stderr=self.secret),
+                      subprocess.CalledProcessError(1, "systemctl", output=self.secret, stderr=self.secret),
+                      ValueError(self.secret)):
+            with self.subTest(error=type(error).__name__):
+                self.runner.side_effect = error
+                deployment = coordinator.Deployment(**self.options)
+                with self.assertRaisesRegex(RuntimeError, "environment-unverified") as caught:
+                    deployment.service.verify_environment(deployment.engine_environment)
+                self.assertNotIn(self.secret, "".join(traceback.format_exception(caught.exception)))
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+                self.assertEqual(self.assert_private(deployment)["outcome"], "query-failed")
+
+    def test_direct_failed_property_command_has_no_raw_output_in_exception(self):
+        self.runner.return_value = subprocess.CompletedProcess([], 1, self.response(), self.secret)
+        deployment = coordinator.Deployment(**self.options)
+        with self.assertRaisesRegex(RuntimeError, "output omitted") as caught:
+            deployment.command(["systemctl", "--user", "show", "private-fixture.service", "--property=Environment"])
+        self.assertNotIn(self.secret, "".join(traceback.format_exception(caught.exception)))
+        self.assert_private(deployment)
+
+    def test_existing_permissive_directory_and_log_are_secured_before_query(self):
+        evidence = self.options["evidence"]
+        evidence.mkdir(mode=0o777)
+        evidence.chmod(0o777)
+        log = evidence / "events.jsonl"
+        previous = '{"event":"previous"}\n'
+        log.write_text(previous)
+        log.chmod(0o666)
+        deployment = coordinator.Deployment(**self.options)
+        self.assertEqual(stat.S_IMODE(evidence.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        self.runner.assert_not_called()
+        # Reapply permissions on later writes as well as construction.
+        evidence.chmod(0o777)
+        log.chmod(0o666)
+        self.runner.return_value = subprocess.CompletedProcess([], 0, self.response(), self.secret)
+        deployment.service.verify_environment(deployment.engine_environment)
+        self.assertTrue(log.read_text().startswith(previous))
+        self.assert_private(deployment)
+
+    def test_new_log_is_private_despite_permissive_umask(self):
+        previous = os.umask(0)
+        try:
+            deployment = coordinator.Deployment(**self.options)
+            self.runner.return_value = subprocess.CompletedProcess([], 0, self.response(), self.secret)
+            deployment.service.verify_environment(deployment.engine_environment)
+        finally:
+            os.umask(previous)
+        self.assert_private(deployment)
+
+    def test_refuses_symlinked_directory_or_ancestor(self):
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o755)
+        mode = stat.S_IMODE(outside.stat().st_mode)
+        evidence = self.options["evidence"]
+        evidence.symlink_to(outside, target_is_directory=True)
+        for destination in (evidence, evidence / "nested"):
+            with self.subTest(destination=destination), self.assertRaises(OSError):
+                coordinator.Deployment(**{**self.options, "evidence": destination})
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), mode)
+        self.runner.assert_not_called()
+
+    def test_refuses_unsafe_existing_logs_without_modifying_targets(self):
+        evidence = self.options["evidence"]
+        evidence.mkdir()
+        outside = self.root / "outside.log"
+        outside.write_text("untouched")
+        outside.chmod(0o644)
+        log = evidence / "events.jsonl"
+        for kind in ("symlink", "dangling-symlink", "hardlink", "fifo", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    log.symlink_to(outside)
+                elif kind == "dangling-symlink":
+                    log.symlink_to(self.root / "missing")
+                elif kind == "hardlink":
+                    os.link(outside, log)
+                elif kind == "fifo":
+                    os.mkfifo(log)
+                else:
+                    log.mkdir()
+                try:
+                    with self.assertRaises((OSError, ValueError)):
+                        coordinator.Deployment(**self.options)
+                finally:
+                    log.rmdir() if kind == "directory" else log.unlink()
+                self.assertEqual(outside.read_text(), "untouched")
+                self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o644)
+                self.assertFalse((self.root / "missing").exists())
+        self.runner.assert_not_called()
+
+    def test_refuses_paths_replaced_with_symlinks_after_construction(self):
+        deployment = coordinator.Deployment(**self.options)
+        outside = self.root / "outside"
+        outside.mkdir()
+        target = outside / "target"
+        target.write_text("untouched")
+        log = deployment.evidence / "events.jsonl"
+        log.symlink_to(target)
+        with self.assertRaises(OSError):
+            deployment.record("refused")
+        log.unlink()
+        deployment.evidence.rmdir()
+        deployment.evidence.symlink_to(outside)
+        with self.assertRaises(OSError):
+            deployment.record("refused")
+        self.assertEqual(target.read_text(), "untouched")
+        self.assertEqual(list(outside.iterdir()), [target])
+
+
 class CoordinatorRegressionTests(unittest.TestCase):
     """Real private filesystem, fake engine bytes and fully mocked service/IPC."""
 
@@ -708,6 +970,69 @@ class CoordinatorRegressionTests(unittest.TestCase):
             return result
 
         return patch("deployment.shutil.copy2", side_effect=copy)
+
+    def test_environment_mismatch_precedes_probe_stop_and_file_mutations(self):
+        self.d.service.verify_environment.side_effect = RuntimeError("environment-mismatch")
+        with patch.object(self.d, "installer") as installer, patch.object(self.d, "plugin") as plugin:
+            with self.assertRaisesRegex(RuntimeError, "environment-mismatch"):
+                self.d.upgrade()
+        self.d.healthy.assert_not_called()
+        self.d.service.stop.assert_not_called()
+        self.d.service.start.assert_not_called()
+        installer.assert_not_called()
+        plugin.assert_not_called()
+        self.assertIsNone(self.d.backup)
+
+    def test_environment_recheck_failure_is_safe_in_upgrade_failure_evidence(self):
+        secret = CoordinatorEvidenceTests.secret
+        output = shlex.join([key + "=" + value for key, value in self.d.engine_environment.items()]
+                            + ["UNRELATED_API_SECRET=" + secret])
+        output = "Environment=" + output + "\nEnvironmentFiles=\nPassEnvironment=\nUnsetEnvironment=\nPAMName=\n"
+        # Retain the real service validation and coordinator runner/logger. Other
+        # service operations and installers stay inert private-fixture mocks.
+        self.d.runner = Mock(side_effect=[subprocess.CompletedProcess([], 0, output, secret),
+                                          subprocess.CompletedProcess([], 1, output, secret)])
+        service = coordinator.UserService("private-fixture.service", runner=self.d.execute)
+        self.d.service.verify_environment = service.verify_environment
+        with patch.object(self.d, "installer"), patch.object(self.d, "plugin"), \
+                patch.object(self.d, "rollback") as rollback:
+            with self.assertRaisesRegex(RuntimeError, "environment-unverified") as caught:
+                self.d.upgrade()
+        rollback.assert_called_once_with()
+        self.d.service.start.assert_not_called()
+        self.assertNotIn(secret, "".join(traceback.format_exception(caught.exception)))
+        log = (self.d.evidence / "events.jsonl").read_text()
+        self.assertNotIn(secret, log)
+        self.assertIn('"event": "upgrade_failed"', log)
+        self.assertEqual(self.d.runner.call_count, 2)
+
+    def test_start_rechecks_environment_and_refuses_changed_destinations(self):
+        self.d.start_service()
+        self.d.service.verify_environment.assert_called_once_with(self.d.engine_environment)
+        self.d.service.start.assert_called_once_with()
+        self.d.service.start.reset_mock()
+        self.d.service.verify_environment.side_effect = RuntimeError("changed service environment")
+        with self.assertRaisesRegex(RuntimeError, "changed service environment"):
+            self.d.start_service()
+        self.d.service.start.assert_not_called()
+
+    def test_running_environment_must_match_before_any_ipc_probe(self):
+        self.d.service.state.return_value["MainPID"] = "12345"
+        raw = b"\0".join(os.fsencode(key + "=" + value) for key, value in self.d.engine_environment.items()) + b"\0"
+        with patch.object(Path, "read_bytes", return_value=raw):
+            self.d.running_environment()
+        for bad in (raw.replace(b"SWIFTWALL_RUNTIME_DIR=", b"WRONG_RUNTIME="), b"HOME=/other\0"):
+            with patch.object(Path, "read_bytes", return_value=bad):
+                with self.assertRaisesRegex(RuntimeError, "Running service environment differs"):
+                    coordinator.Deployment.healthy(self.d, "0.1.0")
+        self.d.service.wait_ready.assert_not_called()
+
+    def test_running_environment_rejects_pid_change(self):
+        raw = b"\0".join(os.fsencode(key + "=" + value) for key, value in self.d.engine_environment.items())
+        self.d.service.state.side_effect = [{"MainPID": "12345"}, {"MainPID": "54321"}]
+        with patch.object(Path, "read_bytes", return_value=raw):
+            with self.assertRaisesRegex(RuntimeError, "Service changed during environment verification"):
+                self.d.running_environment()
 
     def assert_partial_backup_unpublished(self, fault):
         original = self.config.read_bytes()

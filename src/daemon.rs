@@ -198,17 +198,27 @@ impl Engine {
         };
         persister.active = false;
         let dirty = persister.dirty.take();
+        let recovering = std::mem::take(&mut persister.recovering);
         let failed = result.is_err();
         match result {
             Ok(()) => self.persistence_error = None,
             Err(e) => self.persistence_failed(e),
         }
-        if let Some(snapshot) = dirty {
+        if dirty.is_some() || (failed && !recovering) {
             // Preserve the latest state, including a newly imposed suspension,
             // without automatically retrying forever on an unwritable filesystem.
-            let snapshot = if failed { self.state.clone() } else { snapshot };
+            let snapshot = if failed {
+                self.state.clone()
+            } else {
+                dirty.unwrap()
+            };
             if let Err(e) = self.persister.as_mut().unwrap().submit(snapshot) {
                 self.persistence_failed(e);
+            } else {
+                // One best-effort write of the newly imposed suspension, even
+                // without a dirty successor. Failure of that write cannot itself
+                // generate another retry. Independent saves may still coalesce.
+                self.persister.as_mut().unwrap().recovering = failed;
             }
         }
     }
@@ -259,6 +269,7 @@ struct Persister {
     worker: JoinHandle<()>,
     active: bool,
     dirty: Option<State>,
+    recovering: bool,
 }
 impl Persister {
     fn new(path: PathBuf, tx: Sender<Completion>, wake: UnixStream) -> Result<Self, String> {
@@ -285,6 +296,7 @@ impl Persister {
             worker,
             active: false,
             dirty: None,
+            recovering: false,
         })
     }
 
@@ -2485,6 +2497,190 @@ mod tests {
             error
         );
         assert_eq!(fs::read(&fixture.0.state).unwrap(), previous);
+    }
+
+    #[test]
+    fn failed_write_without_dirty_successor_persists_suspension_once() {
+        let fixture = Fixture::new();
+        let mut engine = engine(Instant::now());
+        let (tx, rx) = mpsc::channel();
+        let (wake, _read) = UnixStream::pair().unwrap();
+        let (written_tx, written_rx) = mpsc::channel();
+        let path = fixture.0.state.clone();
+        let mut attempts = 0;
+        engine.persister = Some(
+            Persister::spawn(
+                move |state| {
+                    attempts += 1;
+                    written_tx
+                        .send(state.protective_suspension.clone())
+                        .unwrap();
+                    if attempts == 1 {
+                        Err("transient disk failure".into())
+                    } else {
+                        state.save(&path)
+                    }
+                },
+                tx,
+                wake,
+            )
+            .unwrap(),
+        );
+        engine.save(&fixture.0);
+        let Completion::Persisted(result) = rx.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!()
+        };
+        assert!(engine.persister.as_ref().unwrap().dirty.is_none());
+        engine.persisted(result);
+        assert!(engine.persister.as_ref().unwrap().pending());
+        assert!(engine.deadline.is_none());
+        assert!(engine.persistence_error.is_some());
+        engine.flush_persistence(&rx).unwrap();
+        let written: Vec<_> = written_rx.try_iter().collect();
+        assert_eq!(written.len(), 2);
+        assert!(written[0].is_none());
+        assert!(
+            written[1]
+                .as_ref()
+                .unwrap()
+                .contains("transient disk failure")
+        );
+        let saved = State::load(&fixture.0.state).unwrap();
+        assert_eq!(
+            saved.protective_suspension,
+            engine.state.protective_suspension
+        );
+        let restarted = Engine::new(
+            engine.config.clone(),
+            saved,
+            Some("/old.png".into()),
+            Instant::now(),
+        );
+        assert!(restarted.deadline.is_none());
+        assert!(engine.persistence_error.is_none());
+    }
+
+    #[test]
+    fn repeated_failure_without_dirty_successor_stops_after_one_followup() {
+        let fixture = Fixture::new();
+        let mut engine = engine(Instant::now());
+        let (tx, rx) = mpsc::channel();
+        let (wake, _read) = UnixStream::pair().unwrap();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let written = attempts.clone();
+        engine.persister = Some(
+            Persister::spawn(
+                move |_| {
+                    written.fetch_add(1, Ordering::SeqCst);
+                    Err("persistent disk failure".into())
+                },
+                tx,
+                wake,
+            )
+            .unwrap(),
+        );
+        engine.save(&fixture.0);
+        assert!(engine.flush_persistence(&rx).is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(rx.try_recv().is_err());
+        assert!(engine.state.protective_suspension.is_some());
+        assert!(engine.deadline.is_none());
+    }
+
+    #[test]
+    fn persistence_recovery_preserves_intervening_dirty_and_later_coalesced_saves() {
+        let fixture = Fixture::new();
+        let mut engine = engine(Instant::now());
+        let (tx, rx) = mpsc::channel();
+        let (wake, _read) = UnixStream::pair().unwrap();
+        let (written_tx, written_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let path = fixture.0.state.clone();
+        let mut attempts = 0;
+        engine.persister = Some(
+            Persister::spawn(
+                move |state| {
+                    attempts += 1;
+                    written_tx.send(state.clone()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                    if attempts == 1 {
+                        Err("transient disk failure".into())
+                    } else {
+                        state.save(&path)
+                    }
+                },
+                tx,
+                wake,
+            )
+            .unwrap(),
+        );
+        engine.save(&fixture.0);
+        let initial = written_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(initial.protective_suspension.is_none());
+        // Queue a successor before processing the first failed completion.
+        engine.state.paused = true;
+        engine.state.observed = Some("/dirty-before-failure.png".into());
+        engine.save(&fixture.0);
+        release_tx.send(()).unwrap();
+        let Completion::Persisted(result) = rx.recv_timeout(Duration::from_secs(3)).unwrap() else {
+            panic!("wrong completion")
+        };
+        assert!(result.is_err());
+        engine.persisted(result);
+        let recovery = written_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(recovery.paused);
+        assert_eq!(recovery.observed, engine.state.observed);
+        let suspension = recovery.protective_suspension.clone();
+        assert!(
+            suspension
+                .as_ref()
+                .unwrap()
+                .contains("transient disk failure")
+        );
+        assert!(engine.persistence_error.is_some());
+        assert!(engine.persister.as_ref().unwrap().recovering);
+        assert!(engine.deadline.is_none());
+
+        // Independent saves during recovery must coalesce to the newest state.
+        for image in ["/later-discarded.png", "/later-latest.png"] {
+            engine.state.observed = Some(image.into());
+            engine.save(&fixture.0);
+        }
+        release_tx.send(()).unwrap();
+        let Completion::Persisted(result) = rx.recv_timeout(Duration::from_secs(3)).unwrap() else {
+            panic!("wrong completion")
+        };
+        assert!(result.is_ok());
+        engine.persisted(result);
+        assert!(engine.persistence_error.is_none());
+        assert!(engine.persister.as_ref().unwrap().pending());
+        assert!(!engine.persister.as_ref().unwrap().recovering);
+        assert_eq!(engine.state.protective_suspension, suspension);
+        assert_eq!(
+            State::load(&fixture.0.state).unwrap().observed,
+            recovery.observed
+        );
+        let latest = written_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(latest.observed, Some("/later-latest.png".into()));
+        assert!(latest.paused);
+        assert_eq!(latest.protective_suspension, suspension);
+        release_tx.send(()).unwrap();
+        engine.flush_persistence(&rx).unwrap();
+        assert!(written_rx.try_recv().is_err()); // exactly three writes
+        assert_eq!(engine.status(Instant::now())["persistence_pending"], false);
+        assert!(engine.persistence_error.is_none());
+        let saved = State::load(&fixture.0.state).unwrap();
+        assert_eq!(saved.observed, latest.observed);
+        assert!(saved.paused);
+        assert_eq!(saved.protective_suspension, suspension);
+        let restarted = Engine::new(
+            engine.config.clone(),
+            saved,
+            latest.observed,
+            Instant::now(),
+        );
+        assert!(restarted.deadline.is_none());
+        assert_eq!(restarted.state.protective_suspension, suspension);
     }
 
     #[test]

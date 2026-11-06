@@ -4,6 +4,11 @@ A small, Linux-only wallpaper carousel for Omarchy/Hyprland. SwiftWall selects
 images; **Omarchy remains responsible for rendering them**. SwiftView is a
 separate project and requires no changes.
 
+Licensed under the [MIT License](LICENSE). Public-distribution work and the
+unsubmitted marketplace draft are tracked in [docs/MARKETPLACE.md](docs/MARKETPLACE.md).
+The widget requires separate engine setup; installing QML files alone does not
+build or start the Rust daemon.
+
 **v0.2 development branch:** adds an optional native Omarchy bar widget and control
 panel, event subscriptions, atomic settings updates and sequential mode. This
 local-first milestone has passed supervised local installation and manual widget
@@ -11,6 +16,8 @@ acceptance; it is not a public release or marketplace submission. See
 [docs/V02.md](docs/V02.md) for architecture, protocol, external folder-picker
 dependencies, installation boundaries and known limitations. Machine-specific
 acceptance and deployment evidence remains local and excluded from Git.
+The [hardening review](docs/PUBLIC_READINESS.md) records current offline results,
+remaining verification blockers and the distribution checklist.
 
 The v0.1 milestone passed authorized live Omarchy verification. See
 [docs/VALIDATION.md](docs/VALIDATION.md) for historical coverage and
@@ -116,6 +123,10 @@ memory, not crash-durable storage. Before relying on saved state, poll status un
 SIGTERM/SIGINT shutdown finishes an in-flight application and flushes pending
 state while retaining the singleton lock. A persistence failure protectively
 suspends rotation. A later successful write does not silently clear suspension.
+After an asynchronous write fails, one bounded follow-up attempts to persist the
+new suspension even when no successor was queued. Persistent I/O failure or a
+crash before that write completes can still leave the prior on-disk state; a
+restart cannot recover a suspension that never reached durable storage.
 
 ## Omarchy integration and race safety
 
