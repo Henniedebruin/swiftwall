@@ -179,7 +179,7 @@ def stop(process):
     return {"returncode": process.returncode, "killed_after_timeout": killed}
 
 
-def benchmark(binary, seconds, count, root):
+def benchmark(binary, seconds, count, root, subscribe=False):
     env, paths = prepare(root, count)
     originals = image_hashes(paths["images"])
     expected = {str(paths["images"] / name) for name in originals}
@@ -197,8 +197,25 @@ def benchmark(binary, seconds, count, root):
         started = time.perf_counter()
         process = subprocess.Popen([str(binary), "daemon"], env=env, cwd=root,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        subscriber = None
         try:
             ipc_ms, ready_ms = wait_ready(process, paths, started, expected)
+            if subscribe:
+                subscriber = socket.socket(socket.AF_UNIX)
+                subscriber.settimeout(3)
+                subscriber.connect(str(paths["runtime"] / "control.sock"))
+                subscriber.sendall(b'{"v":1,"op":"subscribe"}\n')
+                initial = bytearray()
+                while b"\n" not in initial:
+                    chunk = subscriber.recv(65536)
+                    if not chunk:
+                        raise RuntimeError("Subscriber disconnected before its initial snapshot")
+                    initial.extend(chunk)
+                    if len(initial) > 1024 * 1024:
+                        raise RuntimeError("Subscriber snapshot exceeds 1 MiB")
+                snapshot = json.loads(initial.split(b"\n", 1)[0])
+                if snapshot.get("event") != "snapshot":
+                    raise RuntimeError("Daemon does not support v0.2 subscriptions")
             time.sleep(1)
             if process.poll() is not None:
                 raise RuntimeError("daemon exited before idle sampling")
@@ -212,6 +229,8 @@ def benchmark(binary, seconds, count, root):
             if process.poll() is not None:
                 raise RuntimeError("daemon exited during idle sampling")
         finally:
+            if subscriber is not None:
+                subscriber.close()
             shutdown = stop(process)
             if image_hashes(paths["images"]) != originals:
                 raise AssertionError("original generated image files were changed")
@@ -235,6 +254,7 @@ def benchmark(binary, seconds, count, root):
         "binary_size_bytes": info.st_size,
         "binary_allocated_bytes": info.st_blocks * 512,
         "images": count,
+        "idle_subscriber": subscribe,
         "startup": {"samples": 1, "ipc_status_ms": ipc_ms,
                     "ipc_and_persisted_collection_ms": ready_ms},
         "cli_version": {"samples": 20, "median_ms": statistics.median(version_times)},
@@ -262,6 +282,7 @@ def main():
     parser.add_argument("--binary", type=Path, default=Path("target/release/swiftwall"))
     parser.add_argument("--seconds", type=seconds_argument, default=10.0)
     parser.add_argument("--images", type=images_argument, default=100)
+    parser.add_argument("--subscribe", action="store_true", help="Hold an idle v0.2 event subscriber during sampling")
     args = parser.parse_args()
     binary = args.binary.resolve()
     if not sys.platform.startswith("linux"):
@@ -271,7 +292,7 @@ def main():
     try:
         # A short fixed parent avoids both inherited TMPDIR and Unix socket limits.
         with tempfile.TemporaryDirectory(prefix="swbench-", dir="/tmp") as temporary:
-            report = benchmark(binary, args.seconds, args.images, Path(temporary))
+            report = benchmark(binary, args.seconds, args.images, Path(temporary), args.subscribe)
         print(json.dumps(report, indent=2, sort_keys=True))
     except (OSError, ValueError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
         print(f"benchmark: {error}", file=sys.stderr)

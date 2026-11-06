@@ -4,13 +4,25 @@ A small, Linux-only wallpaper carousel for Omarchy/Hyprland. SwiftWall selects
 images; **Omarchy remains responsible for rendering them**. SwiftView is a
 separate project and requires no changes.
 
-**v0.1:** a resident, event-driven carousel with a five-minute default interval,
-persistent shuffle bag, CLI controls and systemd user-service integration. Isolated
-tests and authorized live Omarchy verification have passed. See
-[docs/VALIDATION.md](docs/VALIDATION.md) for validation scope and
-[packaging/INSTALL.md](packaging/INSTALL.md) for installation and rollback.
-Machine-specific deployment reports and private acceptance evidence are excluded
-from version control.
+Licensed under the [MIT License](LICENSE). Public-distribution work and the
+unsubmitted marketplace draft are tracked in [docs/MARKETPLACE.md](docs/MARKETPLACE.md).
+The widget requires separate engine setup; installing QML files alone does not
+build or start the Rust daemon.
+
+**v0.2 development branch:** adds an optional native Omarchy bar widget and control
+panel, event subscriptions, atomic settings updates and sequential mode. This
+local-first milestone has passed supervised local installation and manual widget
+acceptance; it is not a public release or marketplace submission. See
+[docs/V02.md](docs/V02.md) for architecture, protocol, external folder-picker
+dependencies, installation boundaries and known limitations. Machine-specific
+acceptance and deployment evidence remains local and excluded from Git.
+The [hardening review](docs/PUBLIC_READINESS.md) records current offline results,
+remaining verification blockers and the distribution checklist.
+
+The v0.1 milestone passed authorized live Omarchy verification. See
+[docs/VALIDATION.md](docs/VALIDATION.md) for historical coverage and
+[packaging/INSTALL.md](packaging/INSTALL.md) for file-only installation/rollback.
+Machine-specific reports and private evidence remain excluded from version control.
 
 ## Behavior
 
@@ -25,6 +37,9 @@ from version control.
 - `next` and `previous` work while user-paused. History is bounded to 128 successful
   SwiftWall selections. Previous/forward navigation intentionally revisits history
   without consuming fresh bag entries; previous does not wrap.
+- Optional sequential mode traverses sorted canonical paths with wraparound;
+  previous/forward history still records successful applications. Mode switches
+  retain the shuffle bag.
 - One shared wallpaper across all monitors, using Omarchy's existing behavior.
 - JPEG, PNG and WebP, case-insensitive extensions, multiple nonrecursive roots.
 - Missing/unreadable folders produce warnings; usable folders continue working.
@@ -37,7 +52,11 @@ from version control.
 
 Requirements: Linux, Rust stable (MSRV 1.89), Omarchy exposing
 `omarchy theme bg set <path>`, and its normal graphical-session environment.
-Python 3 is needed only for packaging tests, file installation and benchmarks.
+The Rust daemon does not require Python. Packaging tools use Python 3. The optional
+v0.2 widget's folder picker additionally requires `/usr/bin/python3`, PyGObject/Gio
+(`python-gobject` on Arch), and a working XDG Desktop Portal FileChooser backend.
+These were already installed on the development machine; no packages are installed
+automatically.
 
 ```sh
 cargo build --release
@@ -54,14 +73,17 @@ folders = ["~/Pictures/Wallpapers", "/absolute/path/to/another/collection"]
 
 Relative paths resolve against the configuration directory; `~/` is expanded.
 Unknown fields, unsupported selection modes, empty folder lists and invalid
-intervals are rejected. The supported interval range is 1–31,536,000 seconds.
-Folders need not exist at startup. Nested folders must be listed explicitly.
-Original images are never modified, copied, converted or overwritten by SwiftWall.
+intervals are rejected. Modes are `shuffle` and `sequential`; intervals span
+1–31,536,000 seconds. Nested folders must be listed explicitly. Existing roots
+may be temporarily unavailable; newly added roots must be readable local
+directories. Original images are never modified, copied, converted or overwritten.
 
-Configuration is user-authored; SwiftWall never rewrites it. Edit via your
-editor's atomic save and invoke `reload`. Invalid reloads retain the prior
-configuration. Membership selection is gated until the new configuration's scan
-completes, so removed roots cannot supply stale selections.
+Configuration can be edited atomically with your editor and `reload`, or updated
+through v0.2's validated, revision-checked settings transaction. Widget Save
+atomically rewrites TOML and normalizes formatting/comments; it never writes
+Omarchy's wallpaper symlink. Invalid reloads retain the prior configuration.
+Removed roots cannot supply stale selections while a new membership scan is pending.
+See the [v0.2 guide](docs/V02.md) for durability, concurrency and rollback details.
 
 ## Commands
 
@@ -74,6 +96,9 @@ swiftwall resume
 swiftwall status
 swiftwall rescan
 swiftwall reload
+swiftwall settings
+swiftwall check-config
+swiftwall request '{"v":1,"op":"getsettings"}'
 ```
 
 Start the daemon manually **only after approving a live test**: although it does
@@ -98,6 +123,10 @@ memory, not crash-durable storage. Before relying on saved state, poll status un
 SIGTERM/SIGINT shutdown finishes an in-flight application and flushes pending
 state while retaining the singleton lock. A persistence failure protectively
 suspends rotation. A later successful write does not silently clear suspension.
+After an asynchronous write fails, one bounded follow-up attempts to persist the
+new suspension even when no successor was queued. Persistent I/O failure or a
+crash before that write completes can still leave the prior on-disk state; a
+restart cannot recover a suspension that never reached durable storage.
 
 ## Omarchy integration and race safety
 
@@ -164,9 +193,10 @@ Inotify drives debounced rescans, with at most one scan in flight and one coales
 follow-up. Missing roots are watched through their nearest existing ancestor;
 watches move down as directories reappear. Overflow triggers reconciliation.
 There is no periodic scan. Changes to symlink targets outside watched roots, and
-filesystems without reliable notifications, may require `rescan`. Network-mounted
-and removable paths are best-effort: unavailability is reported, not repaired by
-restoring a stale image. Prefer ordinary local collection folders for v0.1.
+filesystems without reliable notifications, may require `rescan`. Existing
+unavailable roots are reported, not repaired by restoring a stale image. v0.2
+settings updates conservatively reject new network/GVFS/FUSE roots; use ordinary
+local collection folders. This policy also excludes local FUSE mounts.
 
 ## Files and architecture
 
@@ -174,6 +204,9 @@ restoring a stale image. Prefer ordinary local collection folders for v0.1.
 src/main.rs         CLI entry point
 src/config.rs       strict TOML configuration and XDG locations
 src/daemon.rs       blocking readiness loop, IPC, workers and reconciliation
+src/protocol.rs     versioned JSON requests and bounded event snapshots
+plugin/             optional native Omarchy widget and controller
+manifest.json       local plugin contract (no installation hooks)
 src/runtime.rs      singleton, inotify, signalfd and poll
 src/collection.rs   discovery, fingerprints and bounded header validation
 src/carousel.rs     shuffle bag and back/forward history
@@ -194,7 +227,9 @@ Runtime locations:
 | Omarchy observation | `~/.local/state/omarchy/current/background` (currently hardcoded by Omarchy) |
 
 The private runtime directory is mode 0700. IPC is newline-framed, bounded to
-4 KiB requests and 64 connected clients, with short read/write deadlines. One
+64 KiB requests, 1 MiB responses, 64 connected clients and at most eight event
+subscribers, with short handshake/write-progress deadlines. Idle subscriptions
+have no heartbeat or periodic polling. One
 blocking event loop sleeps in `poll`; there is no async runtime, GUI or renderer.
 The scan and persistence workers block on channels when idle; apply workers exist
 only during a command. State writes use unique same-directory temporary files,
@@ -212,13 +247,22 @@ Direct dependencies:
 - `libc`: narrow Linux readiness, signal, notification and process-group APIs.
 - `image`: bounded header inspection; only JPEG, PNG and WebP features enabled.
 
-No shared SwiftView crate, recursive collections, favourites, categories, GUI,
-per-monitor selection, or alternative rendering backend is included.
+No shared SwiftView crate, recursive collections, favourites, categories,
+standalone GUI, per-monitor selection, or alternative renderer is included.
+The optional QML widget runs inside Omarchy's existing shell, not a Rust GUI.
 
 ## Installation, autostart and rollback
 
+The optional plugin has separate ownership-aware file tooling documented in
+[packaging/PLUGIN_INSTALL.md](packaging/PLUGIN_INSTALL.md). It never enables the
+widget, controls the engine or changes bar settings. Do not run it against the
+live home without deployment approval.
+
 See [packaging/INSTALL.md](packaging/INSTALL.md) for the full procedure and limits.
-After installation approval, from this repository:
+**Review and approve live installation separately from building or testing.**
+Use the existing service when upgrading; do not run a second daemon. The
+[v0.2 guide](docs/V02.md) describes the supervised deployment coordinator, bounded
+activation and rollback limitations. For file-only engine installation:
 
 ```sh
 python3 scripts/install.py --binary target/release/swiftwall --dry-run
@@ -241,9 +285,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now swiftwall.service
 ```
 
-Before updating, rolling back or uninstalling an active service, explicitly stop
-and disable it and verify success (`systemctl --user disable --now swiftwall.service`).
-Stop a manually launched daemon separately. Restore the previous owned files with
+Before updating or rolling back an active service, stop it and verify shutdown
+(`systemctl --user stop swiftwall.service`); preserve its existing autostart state.
+For uninstallation, disable autostart as well. Stop a manually launched daemon
+separately. Restore the previous owned files with
 `python3 scripts/install.py --rollback`, or remove unchanged owned files with
 `python3 scripts/uninstall.py`. Refresh the user manager manually afterward when
 needed. File rollback never restores running processes, wallpaper, or service
@@ -258,6 +303,10 @@ cargo test
 cargo build --release
 python3 -m unittest discover -s scripts -p 'test_install.py' -v
 python3 scripts/benchmark.py --binary target/release/swiftwall --seconds 10
+python3 scripts/benchmark.py --binary target/release/swiftwall --seconds 10 --subscribe
+python3 scripts/validate_plugin.py
+cargo build
+python3 scripts/test_widget.py --binary target/debug/swiftwall
 ```
 
 Automated Rust tests and the normal Python unittest suite use temporary directories,
@@ -270,6 +319,13 @@ The separate `scripts/live_acceptance.py --allow-live-desktop` harness **does ch
 real wallpapers** and must not be run without fresh user approval. It uses
 `scripts/live_pointer.c` for temporary native Wayland input, not as a runtime
 SwiftWall dependency. Private live evidence is excluded under `artifacts/`.
+For an already installed service, the additional `--allow-installed-service`
+flag explicitly authorizes a temporary stop of the verified `swiftwall.service`
+and restoration of its original active state, without changing enablement or
+installation files. See [the live acceptance procedure](docs/VALIDATION.md#controlled-live-acceptance)
+for environment requirements and restoration safeguards. This harness covers the
+engine/CLI and SwiftView integration; native widget and chooser acceptance remains
+a separate manual test.
 
 For isolated tooling/tests, explicit environment overrides are available:
 `SWIFTWALL_CONFIG`, `SWIFTWALL_STATE_DIR`, `SWIFTWALL_RUNTIME_DIR`,

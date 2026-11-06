@@ -1,4 +1,8 @@
-# Isolated release baseline
+# Isolated v0.1 release baseline
+
+These are historical v0.1 measurements. See [docs/V02.md](docs/V02.md)
+for v0.2 architecture and validation, and use the benchmark's `--subscribe` option
+to measure a current build with an idle event subscriber.
 
 Measured locally on Linux/Omarchy with Rust `1.99.1`, optimized release build
 (thin LTO, stripped), on 2026-11-02. These are synthetic filesystem/IPC measurements,

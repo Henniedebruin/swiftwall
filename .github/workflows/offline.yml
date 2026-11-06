@@ -1,0 +1,46 @@
+name: Offline checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check documented minimum Rust version
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 check --locked --all-targets
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Prepare disposable test directory and Rust tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/swiftwall-offline"
+          printf 'TMPDIR=%s/swiftwall-offline\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          rustup component add rustfmt clippy --toolchain stable
+      - name: Format
+        run: cargo +stable fmt --check
+      - name: Lint
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo +stable test --locked --no-fail-fast
+      - name: Release build for isolated Python integration
+        run: cargo +stable build --release --locked
+      - name: Python tests with private fixtures and fake setters
+        run: /usr/bin/python3 -B -m unittest discover -s scripts -p 'test_*.py' -v

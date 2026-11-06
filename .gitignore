@@ -9,6 +9,20 @@
 /artifacts/
 /DEPLOYMENT.md
 /LIVE_ACCEPTANCE.md
+# Machine-specific v0.2 investigations and acceptance/deployment reports.
+# Generic, versioned architecture and usage documentation lives in docs/V02.md.
+/docs/ACTIVATION_HARDENING.md
+/docs/DEPLOYMENT_ORCHESTRATION.md
+/docs/DEPLOYMENT_REHEARSAL.md
+/docs/EXTERNAL_PICKER.md
+/docs/FINAL_NATIVE_ACCEPTANCE.md
+/docs/HARDENING.md
+/docs/LIMITED_NATIVE_PREVIEW.md
+/docs/LOCAL_DEPLOYMENT_ATTEMPT.md
+/docs/NATIVE_PREVIEW.md
+/docs/PANEL_CONNECTION_INVESTIGATION.md
+/docs/UPGRADE_READINESS.md
+/docs/V02_PROTOTYPE.md
 /private/
 /local/
 /screenshots/

@@ -118,6 +118,34 @@ impl Carousel {
         self.propose(self.bag[last].clone(), None)
     }
 
+    /// Propose forward successful history first, then the sorted collection
+    /// successor (wrapping). Mode switches leave the shuffle bag intact; a fresh
+    /// sequential selection consumes its bag entry only on successful commit.
+    pub fn next_sequential(&mut self, current: Option<&Path>) -> Option<PathBuf> {
+        self.pending = None;
+        let forward = match self.anchor(current) {
+            Some(index) => index.checked_add(1),
+            None if current.is_none() => Some(0),
+            None => None,
+        };
+        if let Some(index) = forward.filter(|index| *index < self.history.len())
+            && (self.paths.len() <= 1 || current != Some(self.history[index].as_path()))
+        {
+            return self.propose(self.history[index].clone(), Some(index));
+        }
+        if self.paths.is_empty() {
+            return None;
+        }
+        let index = current
+            .and_then(|path| {
+                self.paths
+                    .binary_search_by(|candidate| candidate.as_path().cmp(path))
+                    .ok()
+            })
+            .map_or(0, |index| (index + 1) % self.paths.len());
+        self.propose(self.paths[index].clone(), None)
+    }
+
     /// Propose the preceding successful apply, without wrapping. If `current`
     /// is unknown to history, the most recent successful apply is the predecessor.
     pub fn previous(&mut self, current: Option<&Path>) -> Option<PathBuf> {
@@ -192,6 +220,75 @@ impl Carousel {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn sequential_sorted_wrap_unknown_and_singleton() {
+        let p = paths(3);
+        let mut carousel = Carousel::default();
+        carousel.reconcile(&[p[2].clone(), p[0].clone(), p[1].clone()]);
+        assert_eq!(
+            carousel.next_sequential(Some(Path::new("/unknown"))),
+            Some(p[0].clone())
+        );
+        for index in [0, 1, 2, 0, 1] {
+            let current = carousel
+                .cursor
+                .map(|cursor| carousel.history[cursor].clone());
+            let next = carousel.next_sequential(current.as_deref()).unwrap();
+            assert_eq!(next, p[index]);
+            carousel.commit(next);
+        }
+        let mut empty = Carousel::default();
+        assert_eq!(empty.next_sequential(None), None);
+        empty.reconcile(&p[..1]);
+        assert_eq!(empty.next_sequential(Some(&p[0])), Some(p[0].clone()));
+    }
+
+    #[test]
+    fn sequential_failure_history_and_mode_switch_preserve_transaction() {
+        let p = paths(4);
+        let mut carousel = Carousel::default();
+        carousel.reconcile(&p);
+        let initial_bag = carousel.bag.clone();
+        let before = serde_json::to_value(&carousel).unwrap();
+        assert_eq!(carousel.next_sequential(None), Some(p[0].clone()));
+        assert_eq!(carousel.next_sequential(None), Some(p[0].clone()));
+        assert_eq!(serde_json::to_value(&carousel).unwrap(), before);
+        carousel.commit(p[0].clone());
+        assert_eq!(
+            carousel.bag,
+            initial_bag
+                .into_iter()
+                .filter(|path| path != &p[0])
+                .collect::<Vec<_>>()
+        );
+        for index in [1, 2] {
+            assert_eq!(
+                carousel.next_sequential(Some(&p[index - 1])),
+                Some(p[index].clone())
+            );
+            carousel.commit(p[index].clone());
+        }
+        let bag = carousel.bag.clone();
+        assert_eq!(carousel.previous(Some(&p[2])), Some(p[1].clone()));
+        assert_eq!(carousel.cursor, Some(2)); // failed apply does not navigate
+        carousel.commit(p[1].clone());
+        assert_eq!(carousel.next(Some(&p[1])), Some(p[2].clone()));
+        carousel.commit(p[2].clone());
+        assert_eq!(carousel.bag, bag); // forward history does not consume
+        assert_eq!(carousel.previous(Some(&p[2])), Some(p[1].clone()));
+        carousel.commit(p[1].clone());
+        assert_eq!(carousel.next_sequential(Some(&p[1])), Some(p[2].clone()));
+        carousel.commit(p[2].clone());
+        assert_eq!(carousel.bag, bag);
+        let next = carousel.next(Some(&p[2])).unwrap();
+        assert_eq!(next, p[3]);
+        carousel.commit(next);
+        assert_eq!(carousel.next_sequential(Some(&p[3])), Some(p[0].clone()));
+        assert!(carousel.bag.is_empty()); // sequential proposal never refills
+        carousel.commit(p[0].clone());
+        assert_eq!(carousel.previous(Some(&p[0])), Some(p[3].clone()));
+    }
 
     fn paths(count: usize) -> Vec<PathBuf> {
         (0..count)
