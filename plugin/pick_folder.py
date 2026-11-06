@@ -58,16 +58,37 @@ def validate_uri(uri):
     return Path(local_folder(path)).as_uri()
 
 
+def _load_glib_unix():
+    from gi.repository import GLibUnix
+    return GLibUnix
+
+
+def unix_apis(gi_module, GLib, loader=_load_glib_unix):
+    """Select current GLibUnix APIs, with legacy GLib fallbacks by capability."""
+    try:
+        gi_module.require_version("GLibUnix", "2.0")
+        glib_unix = loader()
+    except (ImportError, ValueError):
+        glib_unix = None
+
+    signal_add = getattr(glib_unix, "signal_add", None)
+    if not callable(signal_add):
+        signal_add = getattr(GLib, "unix_signal_add", None)
+    if not callable(signal_add):
+        raise ValueError("GLib Unix signal API is unavailable")
+
+    fd_add = getattr(glib_unix, "fd_add_full", None)
+    if not callable(fd_add):
+        fd_add = getattr(GLib, "unix_fd_add_full", None)
+    return signal_add, fd_add if callable(fd_add) else None
+
+
 class Picker:
-    def __init__(self, Gio, GLib, timeout, initial_folder=None, parent=None):
+    def __init__(self, Gio, GLib, timeout, initial_folder=None, parent=None, gi_module=None):
         self.Gio, self.GLib = Gio, GLib
-        try:
-            from gi.repository import GLibUnix
-            self.signal_add = GLibUnix.signal_add
-            self.fd_add = GLibUnix.fd_add_full
-        except ImportError:  # GLib before the separate GLibUnix typelib.
-            self.signal_add = GLib.unix_signal_add
-            self.fd_add = GLib.unix_fd_add_full
+        if gi_module is None:
+            import gi as gi_module
+        self.signal_add, self.fd_add = unix_apis(gi_module, GLib)
         self.timeout, self.initial_folder, self.parent = timeout, initial_folder, parent
         self.loop = GLib.MainLoop()
         self.connection = None
@@ -227,6 +248,8 @@ class Picker:
                     return {"v": 1, "result": "cancelled"}
                 if not hasattr(os, "pidfd_open"):
                     raise ValueError("Parent watching requires Linux pidfd support")
+                if self.fd_add is None:
+                    raise ValueError("GLib Unix file-descriptor API is unavailable")
                 self.parent_fd = os.pidfd_open(self.parent)
                 self.sources.append(self.fd_add(
                     self.GLib.PRIORITY_DEFAULT, self.parent_fd,
@@ -275,7 +298,8 @@ def main(argv=None):
         import gi
         gi.require_version("Gio", "2.0")
         from gi.repository import Gio, GLib
-        result = Picker(Gio, GLib, args.timeout, args.initial_folder, args.watch_parent).run()
+        result = Picker(Gio, GLib, args.timeout, args.initial_folder, args.watch_parent,
+                        gi_module=gi).run()
     except (ImportError, ValueError, OSError, UnicodeError) as error:
         result = {"v": 1, "result": "error", "message": str(error)}
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")), flush=True)

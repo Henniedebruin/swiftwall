@@ -7,7 +7,9 @@ with Gio, or dbus-daemon, is unavailable. Child processes exist only in this
 harness (private bus, fake service, helper), never in the helper itself.
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import select
@@ -18,6 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 # Importing the helper must not create assets outside the two source files.
@@ -125,6 +128,68 @@ def fake_portal():
 
 
 class PureTests(unittest.TestCase):
+    @staticmethod
+    def unix_modules(glib_unix=object(), glib=object()):
+        events = []
+
+        class Gi:
+            @staticmethod
+            def require_version(namespace, version):
+                events.append(("require", namespace, version))
+
+        def load():
+            events.append(("load",))
+            if isinstance(glib_unix, BaseException):
+                raise glib_unix
+            return glib_unix
+
+        return Gi, glib, load, events
+
+    def test_new_glibunix_signal_api_is_preferred_after_version_requirement(self):
+        signal_add = lambda *_args: None
+        fd_add = lambda *_args: None
+        glib_unix = type("GLibUnix", (), {"signal_add": signal_add, "fd_add_full": fd_add})
+        glib = type("GLib", (), {"unix_signal_add": lambda *_args: None,
+                                  "unix_fd_add_full": lambda *_args: None})
+        gi, glib, load, events = self.unix_modules(glib_unix, glib)
+
+        self.assertEqual(picker.unix_apis(gi, glib, load), (signal_add, fd_add))
+        self.assertEqual(events, [("require", "GLibUnix", "2.0"), ("load",)])
+
+    def test_old_glibunix_without_signal_add_uses_glib_signal_api(self):
+        signal_add = lambda *_args: None
+        fd_add = lambda *_args: None
+        glib_unix = type("GLibUnix", (), {"fd_add_full": fd_add})
+        glib = type("GLib", (), {"unix_signal_add": signal_add,
+                                  "unix_fd_add_full": lambda *_args: None})
+        gi, glib, load, _events = self.unix_modules(glib_unix, glib)
+
+        self.assertEqual(picker.unix_apis(gi, glib, load), (signal_add, fd_add))
+
+    def test_unavailable_glibunix_uses_glib_unix_apis(self):
+        signal_add = lambda *_args: None
+        fd_add = lambda *_args: None
+        glib = type("GLib", (), {"unix_signal_add": signal_add, "unix_fd_add_full": fd_add})
+        gi, glib, load, _events = self.unix_modules(ImportError("missing typelib"), glib)
+
+        self.assertEqual(picker.unix_apis(gi, glib, load), (signal_add, fd_add))
+
+    def test_missing_signal_apis_is_a_clean_json_error(self):
+        gi, glib, load, _events = self.unix_modules(type("GLibUnix", (), {}), type("GLib", (), {}))
+        with self.assertRaisesRegex(ValueError, "GLib Unix signal API is unavailable"):
+            picker.unix_apis(gi, glib, load)
+
+        with mock.patch.object(picker, "unix_apis",
+                               side_effect=ValueError("GLib Unix signal API is unavailable")), \
+                contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            status = picker.main([])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(json.loads(stdout.getvalue()), {
+            "v": 1, "result": "error", "message": "GLib Unix signal API is unavailable"})
+
     def test_unicode_and_reserved_names(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / 'caf\u00e9 space # % "quote" \'single\'\nnewline'
