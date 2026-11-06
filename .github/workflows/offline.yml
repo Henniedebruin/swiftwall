@@ -25,14 +25,14 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
-      TMPDIR: ${{ runner.temp }}/swiftwall-offline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Prepare disposable test directory and Rust tools
         run: |
-          mkdir -p "$TMPDIR"
+          mkdir -p "$RUNNER_TEMP/swiftwall-offline"
+          printf 'TMPDIR=%s/swiftwall-offline\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           rustup component add rustfmt clippy --toolchain stable
       - name: Format
         run: cargo +stable fmt --check
