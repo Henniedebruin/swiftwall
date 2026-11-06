@@ -46,14 +46,113 @@ TestCase {
     }
     function test_noOptimisticCommit() {
         draft.setInterval(42)
-        draft.committed({ok: false, code: "revision_conflict"})
+        var dispatchedAt = draft.snapshotGeneration
+        draft.committed({ok: false, code: "revision_conflict"}, dispatchedAt)
         verify(draft.dirty); compare(draft.snapshotSettings.interval_seconds, 300)
-        draft.committed({ok: true})
+        draft.committed({ok: true}, dispatchedAt)
         verify(draft.dirty)
         var saved = settings(); saved.interval_seconds = 42
-        draft.committed({ok: true, settings: saved, revision: "instance:2"})
+        draft.committed({ok: true, settings: saved, revision: "instance:2"}, dispatchedAt)
         verify(!draft.dirty); compare(draft.intervalSeconds, 42)
         compare(draft.baseRevision, "instance:2")
+    }
+    function test_unchangedAuthoritySnapshotDoesNotInvalidateSaveResponse() {
+        draft.setInterval(42)
+        var dispatchedAt = draft.snapshotGeneration
+        draft.ingest(settings(), "instance:1")
+        compare(draft.snapshotGeneration, dispatchedAt)
+        var saved = settings(); saved.interval_seconds = 42
+        draft.committed({ok: true, settings: saved, revision: "instance:2"}, dispatchedAt)
+        verify(!draft.dirty)
+        compare(draft.intervalSeconds, 42)
+        compare(draft.baseRevision, "instance:2")
+    }
+    function test_snapshotBeforeOldResponsePreservesNewerAuthorityAndDirtyDraft() {
+        draft.setInterval(42)
+        var dispatchedAt = draft.snapshotGeneration
+        var newer = settings(); newer.interval_seconds = 600; newer.selection = "sequential"
+        draft.ingest(newer, "opaque-newer")
+
+        var saved = settings(); saved.interval_seconds = 42
+        draft.committed({ok: true, settings: saved, revision: "opaque-older"}, dispatchedAt)
+
+        compare(draft.snapshotRevision, "opaque-newer")
+        compare(draft.snapshotSettings.interval_seconds, 600)
+        compare(draft.snapshotSettings.selection, "sequential")
+        compare(draft.intervalSeconds, 42)
+        compare(draft.baseRevision, "instance:1")
+        verify(draft.dirty)
+        verify(draft.stale)
+    }
+    function test_matchingSnapshotBeforeResponseCompletesOrdinarySave() {
+        draft.setInterval(42)
+        var dispatchedAt = draft.snapshotGeneration
+        var saved = settings(); saved.interval_seconds = 42
+        draft.ingest(saved, "opaque-saved")
+
+        draft.committed({ok: true, settings: saved, revision: "opaque-saved"}, dispatchedAt)
+
+        compare(draft.intervalSeconds, 42)
+        compare(draft.snapshotRevision, "opaque-saved")
+        compare(draft.baseRevision, "opaque-saved")
+        verify(!draft.dirty)
+        verify(!draft.stale)
+    }
+    function test_conflictingSnapshotWithSameOpaqueRevisionStillWins() {
+        draft.setInterval(42)
+        var dispatchedAt = draft.snapshotGeneration
+        var newer = settings(); newer.interval_seconds = 800
+        draft.ingest(newer, "opaque-token")
+
+        var saved = settings(); saved.interval_seconds = 42
+        draft.committed({ok: true, settings: saved, revision: "opaque-token"}, dispatchedAt)
+
+        compare(draft.snapshotSettings.interval_seconds, 800)
+        compare(draft.intervalSeconds, 42)
+        verify(draft.dirty)
+        verify(draft.stale)
+    }
+    function test_noOpSaveResponseClearsDirtyDraft() {
+        draft.setInterval(42)
+        draft.setInterval(300)
+        verify(draft.dirty)
+        var dispatchedAt = draft.snapshotGeneration
+
+        draft.committed({ok: true, settings: settings(), revision: "instance:1"}, dispatchedAt)
+
+        compare(draft.intervalSeconds, 300)
+        compare(draft.baseRevision, "instance:1")
+        verify(!draft.dirty)
+        verify(!draft.stale)
+    }
+    function test_failureAfterNewerSnapshotKeepsDraftAndAuthority() {
+        draft.setInterval(42)
+        var dispatchedAt = draft.snapshotGeneration
+        var newer = settings(); newer.interval_seconds = 900
+        draft.ingest(newer, "restart:opaque")
+
+        draft.committed({ok: false, code: "disconnected"}, dispatchedAt)
+
+        compare(draft.snapshotRevision, "restart:opaque")
+        compare(draft.snapshotSettings.interval_seconds, 900)
+        compare(draft.intervalSeconds, 42)
+        verify(draft.dirty)
+        verify(draft.stale)
+    }
+    function test_responseBeforeNewerSnapshotFollowsNewestAuthority() {
+        draft.setInterval(42)
+        var dispatchedAt = draft.snapshotGeneration
+        var saved = settings(); saved.interval_seconds = 42
+        draft.committed({ok: true, settings: saved, revision: "opaque-saved"}, dispatchedAt)
+
+        var newer = settings(); newer.interval_seconds = 700; newer.selection = "sequential"
+        draft.ingest(newer, "opaque-newer")
+
+        compare(draft.intervalSeconds, 700)
+        compare(draft.selection, "sequential")
+        compare(draft.baseRevision, "opaque-newer")
+        verify(!draft.dirty)
+        verify(!draft.stale)
     }
     function test_validation_data() {
         return [{tag: "zero", interval: 0, mode: "shuffle", folders: ["/a"], valid: false},

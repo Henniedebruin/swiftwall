@@ -17,6 +17,7 @@ Ui.Panel {
     property string inlineError: ""
     property string validationSummary: ""
     property string saveRequestId: ""
+    property double saveSnapshotGeneration: -1
     property string validationRequestId: ""
     property bool validationAddsFolder: false
     property bool pickerActive: false
@@ -51,6 +52,7 @@ Ui.Panel {
     function save() {
         if (!editable || !draftModel.dirty || !draftModel.valid || saveRequestId !== "") return
         inlineError = ""
+        saveSnapshotGeneration = draftModel.snapshotGeneration
         saveRequestId = service.updateSettings(draftModel.value(), draftModel.baseRevision)
     }
     function revert() {
@@ -116,10 +118,11 @@ Ui.Panel {
             if (id === root.saveRequestId) {
                 root.saveRequestId = ""
                 if (reply.ok) {
-                    draftModel.committed(reply)
+                    draftModel.committed(reply, root.saveSnapshotGeneration)
                     root.inlineError = reply.config_durability
                         ? "Saved, but durability is uncertain: " + reply.config_durability : ""
                 } else root.inlineError = (reply.code ? reply.code + ": " : "") + (reply.error || "Save failed")
+                root.saveSnapshotGeneration = -1
             } else if (id === root.validationRequestId) {
                 root.validationRequestId = ""
                 if (!reply.ok) {

@@ -110,6 +110,21 @@ The CI checkout action is pinned to the verified v7 commit. GitHub CI subsequent
 passed as recorded below; marketplace submission remains pending. No public
 release is claimed.
 
+## Settings-save response ordering
+
+The automated PR review identified an additional cross-socket race: an old Save
+response could overwrite a newer subscribed settings snapshot. The panel now
+captures the settings-authority generation at dispatch. A changed snapshot wins
+over an older response; a matching snapshot can complete the save normally, and
+unchanged status snapshots do not spuriously invalidate it. Revision strings remain
+opaque. Content comparison supports Qt QVariantList as well as JavaScript arrays.
+Conflicting authority retains a dirty/stale draft instead of silently discarding it.
+
+The final focused Qt tests passed **21 cases**, and the complete real-socket
+Quickshell offscreen harness passed through settings changes and daemon restart.
+Those checks cover the later UI-only change; the preceding successful supervised
+live engine/SwiftView run is not being relabeled as a new native save-order test.
+
 ## Supervised native acceptance
 
 The final complete run passed after recovery from an intervening machine shutdown.
