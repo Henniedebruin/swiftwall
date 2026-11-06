@@ -107,8 +107,10 @@ ID was absent from the current marketplace registry when checked.
 
 The owner selected MIT licensing; the root `LICENSE` now records those terms.
 The CI checkout action is pinned to the verified v7 commit. GitHub CI subsequently
-passed as recorded below; marketplace submission remains pending. No public
-release is claimed.
+passed as recorded below. The repository is now public and the marketplace
+request is submitted, pending validation/approval:
+<https://github.com/omacom/omarchy-plugin-marketplace/issues/14219>.
+No tagged stable release or approved listing is claimed.
 
 ## Settings-save response ordering
 

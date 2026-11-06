@@ -5,7 +5,7 @@ images; **Omarchy remains responsible for rendering them**. SwiftView is a
 separate project and requires no changes.
 
 Licensed under the [MIT License](LICENSE). Public-distribution work and the
-unsubmitted marketplace draft are tracked in [docs/MARKETPLACE.md](docs/MARKETPLACE.md).
+marketplace submission status are tracked in [docs/MARKETPLACE.md](docs/MARKETPLACE.md).
 The widget requires separate engine setup; installing QML files alone does not
 build or start the Rust daemon.
 
