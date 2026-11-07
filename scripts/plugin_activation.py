@@ -14,6 +14,8 @@ from pathlib import Path
 import signal
 import subprocess
 
+from evidence_support import private_evidence_directory, private_evidence_log
+
 
 PLUGIN_ID = "io.github.henniedebruin.swiftwall"
 IPC_TIMEOUT = "10s"
@@ -96,9 +98,11 @@ class OmarchyActivation:
         self.last_outcome = None
 
     def record(self, event, **fields):
-        self.evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with (self.evidence / "activation.jsonl").open("a") as stream:
-            stream.write(json.dumps({"event": event, **fields}) + "\n")
+        with private_evidence_directory(self.evidence) as directory:
+            stream = private_evidence_log(directory, create=True, name="activation.jsonl")
+            assert stream is not None  # create=True either returns a stream or raises.
+            with stream:
+                stream.write(json.dumps({"event": event, **fields}) + "\n")
 
     def invoke(self, args):
         try:
