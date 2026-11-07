@@ -1180,6 +1180,60 @@ class CoordinatorRegressionTests(unittest.TestCase):
     def test_failed_stop_restarts_when_actual_service_is_stopped(self):
         self.assert_failed_stop_reconciles_actual_state(active=False)
 
+    def assert_rollback_preserves_preplanted_target(self, name):
+        target = self.home / "protected-unrelated-file"
+        target.write_bytes(b"protected unrelated original\n")
+        target.chmod(0o600)
+        planted = self.d.evidence / name
+        self.d.evidence.chmod(0o777)
+        planted.symlink_to(target)
+        # Repeat coordinator tightening after the link was planted, just as on reuse.
+        with coordinator.private_evidence_directory(self.d.evidence):
+            pass
+        self.d.activate.side_effect = RuntimeError("injected post-backup activation failure")
+        with patch.object(self.d, "installer"), patch.object(self.d, "plugin"), \
+                patch.object(self.d, "command", return_value="{}"):
+            with self.assertRaisesRegex(RuntimeError, "injected post-backup"):
+                self.d.upgrade()
+        self.assertIsNotNone(self.d.backup)
+        self.assertEqual(target.read_bytes(), b"protected unrelated original\n")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        self.assertTrue(planted.is_symlink())
+        self.assertTrue(self.d.service.start.called, "recovery must still restart the engine")
+        self.assertEqual(self.config.read_bytes(), (self.d.backup / "config").read_bytes())
+        snapshots = list(self.d.evidence.glob("rollback-input-*/config"))
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].read_bytes(), self.config.read_bytes())
+        self.assertEqual((snapshots[0].parent / "state").read_bytes(), self.state.read_bytes())
+        self.assertEqual(stat.S_IMODE(snapshots[0].stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(snapshots[0].parent.stat().st_mode), 0o700)
+
+    def test_rollback_config_symlink_cannot_overwrite_unrelated_protected_file(self):
+        self.assert_rollback_preserves_preplanted_target("rollback-input-config")
+
+    def test_rollback_state_symlink_cannot_overwrite_unrelated_protected_file(self):
+        self.assert_rollback_preserves_preplanted_target("rollback-input-state")
+
+    def test_repeated_rollback_uses_distinct_private_input_snapshots(self):
+        self.d.capture_backup()
+        self.d.original = {"enabled": "enabled-runtime"}
+        previous_umask = os.umask(0)
+        try:
+            with patch.object(self.d, "command", return_value="{}"):
+                self.d.rollback()
+                self.d.rollback()
+        finally:
+            os.umask(previous_umask)
+        snapshots = list(self.d.evidence.glob("rollback-input-*/config"))
+        self.assertEqual(len(snapshots), 2)
+        for config in snapshots:
+            self.assertEqual(config.read_bytes(), self.config.read_bytes())
+            self.assertEqual((config.parent / "state").read_bytes(), self.state.read_bytes())
+            self.assertEqual(stat.S_IMODE(config.parent.stat().st_mode), 0o700)
+            for path in (config, config.parent / "state"):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(path.stat().st_nlink, 1)
+
     def test_activation_failure_arms_deactivation_before_callback_and_runs_real_rollback(self):
         order = []
         failure = RuntimeError("injected partial private activation")
