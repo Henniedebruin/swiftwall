@@ -9,6 +9,7 @@ private controller/transport. Engine/plugin installers remain file-only.
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 import shutil
 import socket
@@ -327,8 +328,24 @@ class Deployment:
             raise RuntimeError("No stopped-state backup; manual recovery required")
         # Idempotent caller guard: don't consume an unrelated previous generation.
         self.service.stop()
-        for path, name in ((self.config, "rollback-input-config"), (self.state, "rollback-input-state")):
-            shutil.copy2(path, self.evidence / name)
+        # Never reuse predictable children of formerly shared evidence. Keep each
+        # attempt's inputs in a newly created private directory, pinned by fd.
+        with private_evidence_directory(self.evidence) as directory:
+            name = "rollback-input-" + secrets.token_hex(16)
+            os.mkdir(name, mode=0o700, dir_fd=directory)
+            snapshot = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                               dir_fd=directory)
+            try:
+                for source, filename in ((self.config, "config"), (self.state, "state")):
+                    fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=snapshot)
+                    with os.fdopen(fd, "wb") as destination, source.open("rb") as stream:
+                        shutil.copyfileobj(stream, destination)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+            finally:
+                os.close(snapshot)
+        self.record("rollback_inputs_captured", directory=name)
         cleanup_error = None
         if self.widget_active:
             try:

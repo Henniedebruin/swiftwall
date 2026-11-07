@@ -144,6 +144,37 @@ use a fresh private directory. If the vulnerable coordinator was actually run wi
 a planted link and an inline credential, treat that credential as exposed and
 rotate it. No evidence of such an incident on this machine has been established.
 
+## Rollback-input overwrite follow-up
+
+A separate medium-severity issue was reproduced at
+`fea3b3dec3eb53804f31da066348ea6a6f05f1f4`. During post-backup failure recovery,
+`shutil.copy2` followed retained `rollback-input-config` or `rollback-input-state`
+symlinks inside an owned but formerly writable evidence directory. An account
+that could plant either link could redirect the copy to a different protected
+regular file writable by the deployment account. This affects the optional
+supervised coordinator's recovery path; ordinary runtime and fresh private
+evidence do not establish this overwrite path. The prior activation-log fix did
+not cover these separate copies.
+
+Recovery now creates a fresh, unpredictable `rollback-input-*` directory for
+each attempt, relative to the secured evidence-directory descriptor. The new
+directory is `0700`; its `config` and `state` files are created exclusively with
+no-follow opens at `0600`, regardless of source permissions. It does not open or
+replace the old predictable children. The `rollback_inputs_captured` event gives
+the relative snapshot directory. Repeated recovery preserves separate snapshots.
+
+Both protected-target regressions failed against the old code because the target
+was overwritten, then passed with the fix while recovery still restarted the
+fixture engine. A permissive-umask test verifies separate private snapshots across
+two rollback attempts. Full local Python discovery passed **415 tests in 142.003s**.
+These are private filesystem/fake-manager tests, not real-manager or live desktop
+acceptance. Hosted CI for this follow-up has not yet been claimed.
+
+This fix does not undo a prior overwrite or make old shared evidence trustworthy.
+If an affected recovery was actually run with planted links, inspect and restore
+the affected target from a trusted backup. No such incident on this machine has
+been established. Use fresh private evidence for sensitive supervised operations.
+
 ## Settings-save response ordering
 
 The automated PR review identified an additional cross-socket race: an old Save
