@@ -112,6 +112,38 @@ request is submitted, pending validation/approval:
 <https://github.com/omacom/omarchy-plugin-marketplace/issues/14219>.
 No tagged stable release or approved listing is claimed.
 
+## Activation-evidence symlink disclosure follow-up
+
+A medium-severity issue was confirmed at public commit
+`1e8ae33db703d9b3d3ad6f2ffb131f6bd07be4b1`: the optional supervised
+coordinator tightened an owned preexisting evidence directory but activation's
+separate `activation.jsonl` writer still followed a planted symlink. Another local
+account able to plant that link while the directory was writable could receive
+full shell configuration, including any real inline credential, through an
+attacker-accessible target. Fresh private evidence, ordinary daemon/widget runtime,
+and configurations without credentials do not establish that disclosure path.
+
+Activation now shares the coordinator's descriptor-relative evidence writer:
+no symlink traversal for directory components or the log, current-user ownership,
+singly linked regular files, and `0700`/`0600` permissions. Unsafe logs fail closed
+without writing to or changing their targets. The helpers live in
+`scripts/evidence_support.py`; coordinator re-exports preserve rehearsal callers.
+Full activation state remains in memory and private evidence for reconciliation;
+this is not a general removal of secrets from all activation diagnostics.
+
+The isolated dummy-credential regression failed on the original code because the
+planted target received activation records. It passes with the fix. Additional
+activation-path checks cover hardlinks, FIFOs, symlinked directories, permissive
+umask and preservation of previous entries. Full local Python discovery passed
+**412 tests in 139.723s**. No live shell/service operations were performed. Hosted
+CI and marketplace approval for this follow-up are not yet claimed.
+
+The fix cannot undo historical disclosure or revoke access through already-open
+file descriptors. Do not reuse formerly shared evidence for sensitive operations;
+use a fresh private directory. If the vulnerable coordinator was actually run with
+a planted link and an inline credential, treat that credential as exposed and
+rotate it. No evidence of such an incident on this machine has been established.
+
 ## Settings-save response ordering
 
 The automated PR review identified an additional cross-socket race: an old Save
