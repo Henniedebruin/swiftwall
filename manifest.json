@@ -4,7 +4,8 @@
   "name": "SwiftWall",
   "version": "0.2.0-dev",
   "author": "Henniedebruin",
-  "description": "Local-first SwiftWall controls and transactional wallpaper settings.",
+  "license": "MIT",
+  "description": "Wallpaper carousel for Omarchy and Hyprland. Rotates images from your chosen folders on a timer, with pause/resume and next/previous controls in the bar, plus shuffle or sequential order. Runs locally.",
   "kinds": ["service", "bar-widget"],
   "entryPoints": {
     "service": "plugin/Service.qml",
@@ -12,7 +13,9 @@
   },
   "barWidget": {
     "displayName": "SwiftWall",
+    "description": "Wallpaper carousel controls: pause and resume, step next or previous, and open interval and folder settings.",
     "category": "System",
+    "aliases": ["wallpaper", "wallpapers", "background", "carousel", "slideshow", "rotate"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": { "showCountdown": false },
