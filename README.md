@@ -9,6 +9,54 @@ marketplace submission status are tracked in [docs/MARKETPLACE.md](docs/MARKETPL
 The widget requires separate engine setup; installing QML files alone does not
 build or start the Rust daemon.
 
+## Quick start
+
+Requirements: Linux, Omarchy, Rust stable (MSRV 1.89), and Python 3 for the
+packaging tools. The bar widget's folder picker additionally needs
+`/usr/bin/python3` with PyGObject/Gio (`python-gobject` on Arch) and a working
+XDG Desktop Portal FileChooser backend. No packages are installed automatically.
+
+```sh
+# 1. Build the engine
+cargo build --release --locked
+
+# 2. Install the engine and its user service (file-only; add --dry-run to preview)
+python3 scripts/install.py --binary target/release/swiftwall
+
+# 3. Install the bar widget files (file-only; add --dry-run to preview)
+python3 scripts/plugin_install.py install
+
+# 4. Create the configuration BEFORE starting the service. Neither installer
+#    creates it, and the daemon exits at startup when it is missing — the unit
+#    then restarts until it hits systemd's start limit. Review config.example.toml
+#    first and set `folders` to your real local image directories.
+mkdir -p ~/.config/swiftwall
+cp config.example.toml ~/.config/swiftwall/config.toml
+$EDITOR ~/.config/swiftwall/config.toml
+
+# 5. Start the engine, then show the widget in the bar
+systemctl --user daemon-reload
+systemctl --user enable --now swiftwall.service
+omarchy plugin enable io.github.henniedebruin.swiftwall
+```
+
+If you started the service before creating a configuration and it hit
+`start-limit-hit`, clear the failed state before trying again:
+
+```sh
+systemctl --user reset-failed swiftwall.service
+systemctl --user start swiftwall.service
+```
+
+Configuration details are in [Build and configure](#build-and-configure).
+
+Both installers are **file-only**: they never launch the engine, call
+`systemctl`, or edit bar settings, they refuse unowned/modified files and
+symlinked installation paths, and every subcommand supports `--dry-run`.
+Full procedures, boundaries and rollback are in
+[packaging/INSTALL.md](packaging/INSTALL.md) and
+[packaging/PLUGIN_INSTALL.md](packaging/PLUGIN_INSTALL.md).
+
 **v0.2 development branch:** adds an optional native Omarchy bar widget and control
 panel, event subscriptions, atomic settings updates and sequential mode. This
 local-first milestone has passed supervised local installation and manual widget
