@@ -17,23 +17,38 @@ packaging tools. The bar widget's folder picker additionally needs
 XDG Desktop Portal FileChooser backend. No packages are installed automatically.
 
 ```sh
-# Build the engine
+# 1. Build the engine
 cargo build --release --locked
 
-# Install the engine and its user service (file-only; add --dry-run to preview)
+# 2. Install the engine and its user service (file-only; add --dry-run to preview)
 python3 scripts/install.py --binary target/release/swiftwall
 
-# Install the bar widget files (file-only; add --dry-run to preview)
+# 3. Install the bar widget files (file-only; add --dry-run to preview)
 python3 scripts/plugin_install.py install
 
-# Start the engine, then show the widget in the bar
+# 4. Create the configuration BEFORE starting the service. Neither installer
+#    creates it, and the daemon exits at startup when it is missing — the unit
+#    then restarts until it hits systemd's start limit. Review config.example.toml
+#    first and set `folders` to your real local image directories.
+mkdir -p ~/.config/swiftwall
+cp config.example.toml ~/.config/swiftwall/config.toml
+$EDITOR ~/.config/swiftwall/config.toml
+
+# 5. Start the engine, then show the widget in the bar
 systemctl --user daemon-reload
 systemctl --user enable --now swiftwall.service
 omarchy plugin enable io.github.henniedebruin.swiftwall
 ```
 
-Then set your wallpaper folders and interval in
-`~/.config/swiftwall/config.toml` — see [Build and configure](#build-and-configure).
+If you started the service before creating a configuration and it hit
+`start-limit-hit`, clear the failed state before trying again:
+
+```sh
+systemctl --user reset-failed swiftwall.service
+systemctl --user start swiftwall.service
+```
+
+Configuration details are in [Build and configure](#build-and-configure).
 
 Both installers are **file-only**: they never launch the engine, call
 `systemctl`, or edit bar settings, they refuse unowned/modified files and
