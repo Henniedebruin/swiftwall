@@ -71,6 +71,80 @@ class EnvironmentContractTests(unittest.TestCase):
             with self.subTest(code=code), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
                 control.UserService(UNIT, runner=runner).verify_environment({"HOME": "/private/home"})
 
+    def fallback(self, *, load=None, files=None, show=None, expected=None):
+        path = "/org/freedesktop/systemd1/unit/private_2eservice"
+        def result(text, code=0):
+            return subprocess.CompletedProcess([], code, text, "PRIVATE_SECRET")
+        show = show if show is not None else result(
+            "Environment=HOME=/private/home\nPassEnvironment=\nUnsetEnvironment=\nPAMName=\n")
+        load = load if load is not None else result(f'o "{path}"\n')
+        files = files if files is not None else result("a(sb) 0\n")
+        runner = mock.Mock(side_effect=[show, load, files])
+        service = control.UserService("private-alias.service", runner=runner)
+        service.verify_environment(expected if expected is not None else {"HOME": "/private/home"})
+        self.assertEqual(runner.call_count, 3)
+        self.assertEqual(runner.call_args_list[1].args[0], [
+            "busctl", "--user", "call", "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+            "LoadUnit", "s", "private-alias.service"])
+        self.assertEqual(runner.call_args_list[2].args[0], [
+            "busctl", "--user", "get-property", "org.freedesktop.systemd1",
+            path, "org.freedesktop.systemd1.Service", "EnvironmentFiles"])
+        for call in runner.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], 10)
+
+    def test_missing_environment_files_requires_typed_empty_dbus_proof(self):
+        self.fallback()
+
+    def test_fallback_refuses_nonempty_wrong_typed_or_malformed_properties(self):
+        for text in ('a(sb) 1 "/private/fixture.env" false',
+                     'a(sb) 1 "/private/fixture.env" true',
+                     'a(sb) 2 "/private/one" false "/private/two" true',
+                     '', 'as 0', 'a(sb)', 'a(sb) 0 PRIVATE_SECRET',
+                     'a(sb) 0\na(sb) 1 "/private/fixture.env" false'):
+            with self.subTest(text=text), self.assertRaisesRegex(control.ServiceError, "environment-unverified") as caught:
+                self.fallback(files=subprocess.CompletedProcess([], 0, text, "PRIVATE_SECRET"))
+            self.assertNotIn("PRIVATE_SECRET", str(caught.exception))
+
+    def test_fallback_load_response_requires_successful_typed_unit_path(self):
+        for text in ('', 's "/org/freedesktop/systemd1/unit/private"',
+                     'o "/wrong/path"', 'o "/org/freedesktop/systemd1/unit/private" extra',
+                     'o "/org/freedesktop/systemd1/unit/private"\nPRIVATE_SECRET'):
+            with self.subTest(text=text), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
+                self.fallback(load=subprocess.CompletedProcess([], 0, text, "PRIVATE_SECRET"))
+
+    def test_fallback_command_errors_and_exceptions_fail_closed_without_secrets(self):
+        for stage in ("load", "files"):
+            for response in (subprocess.CompletedProcess([], 1, 'a(sb) 0', "PRIVATE_SECRET"),
+                             FileNotFoundError("PRIVATE_SECRET"),
+                             subprocess.TimeoutExpired(["busctl"], 10, output="PRIVATE_SECRET"),
+                             RuntimeError("PRIVATE_SECRET")):
+                with self.subTest(stage=stage, response=type(response).__name__), self.assertRaises(control.ServiceError) as caught:
+                    self.fallback(**{stage: response})
+                self.assertEqual(caught.exception.category, "environment-unverified")
+                self.assertNotIn("PRIVATE_SECRET", str(caught.exception))
+                self.assertIsNone(caught.exception.__context__)
+
+    def test_fallback_does_not_replace_other_environment_checks(self):
+        for key in ("Environment", "PassEnvironment", "UnsetEnvironment", "PAMName"):
+            fields = {"Environment": "HOME=/private/home", "PassEnvironment": "",
+                      "UnsetEnvironment": "", "PAMName": ""}
+            del fields[key]
+            runner = mock.Mock(return_value=subprocess.CompletedProcess(
+                [], 0, "\n".join(k + "=" + v for k, v in fields.items()), ""))
+            with self.subTest(missing=key), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
+                control.UserService(UNIT, runner=runner).verify_environment({"HOME": "/private/home"})
+            self.assertEqual(runner.call_count, 1)
+        for key in ("PassEnvironment", "UnsetEnvironment", "PAMName"):
+            fields = {"Environment": "HOME=/private/home", "PassEnvironment": "",
+                      "UnsetEnvironment": "", "PAMName": ""}
+            fields[key] = "PRIVATE_SECRET"
+            with self.subTest(nonempty=key), self.assertRaisesRegex(control.ServiceError, "environment-unverified"):
+                self.fallback(show=subprocess.CompletedProcess(
+                    [], 0, "\n".join(k + "=" + v for k, v in fields.items()), ""))
+        with self.assertRaisesRegex(control.ServiceError, "environment-mismatch"):
+            self.fallback(expected={"HOME": "/elsewhere"})
+
 
 def probe(binary=BINARY, protocol=1):
     if protocol is None:

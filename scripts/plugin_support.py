@@ -286,7 +286,7 @@ def transaction(home, before, current, previous):
         if moved_old:
             assert before is not None
             verify_tree(backup, before["current"])
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         try:
             if workspace is not None:
                 # Never move an unexpected replacement or delete additions in a
@@ -312,7 +312,7 @@ def transaction(home, before, current, previous):
                     rename_noreplace(root, workspace / "failed-new")
                 if moved_old:
                     rename_noreplace(workspace / "old", root)
-        except Exception as recovery:  # noqa: BLE001 - retain backup on any recovery failure
+        except (Exception, KeyboardInterrupt) as recovery:  # noqa: BLE001 - retain backup on recovery failure
             # Keep the backup for manual recovery rather than deleting it.
             raise InstallError(f"Transaction failed: {exc}; recovery failed: {recovery}; "
                                f"backup retained at {workspace}") from exc

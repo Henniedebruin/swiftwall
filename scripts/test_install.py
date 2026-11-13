@@ -179,6 +179,66 @@ class InstallTests(unittest.TestCase):
                 self.install()
             self.assertEqual(self.snapshot(), original)
 
+    def test_keyboard_interrupt_after_write_restores_first_install_and_upgrade(self):
+        original_write = support.atomic_write
+        for installed in (False, True):
+            if installed:
+                self.install()
+                self.binary.write_bytes(b"version two")
+            before = self.snapshot()
+            for number in (1, 2, 3):
+                calls = []
+                def interrupt_after_write(path, item):
+                    original_write(path, item)
+                    calls.append(path)
+                    if len(calls) == number:
+                        raise KeyboardInterrupt("injected after write")
+                with self.subTest(installed=installed, number=number), \
+                        mock.patch.object(support, "atomic_write", side_effect=interrupt_after_write), \
+                        self.assertRaisesRegex(support.InstallError, "original files restored") as caught:
+                    self.install()
+                self.assertIsInstance(caught.exception.__cause__, KeyboardInterrupt)
+                self.assertEqual(self.snapshot(), before)
+                if not installed:
+                    self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_repeated_keyboard_interrupt_reports_recovery_failure_and_continues(self):
+        self.install()
+        before = self.snapshot()
+        self.binary.write_bytes(b"version two")
+        original_write = support.atomic_write
+        calls = []
+        def interrupt(path, item):
+            calls.append(path)
+            if len(calls) == 3:
+                raise KeyboardInterrupt("recovery interrupted")
+            original_write(path, item)
+            if len(calls) == 2:
+                raise KeyboardInterrupt("primary interrupted")
+        with mock.patch.object(support, "atomic_write", side_effect=interrupt), \
+                self.assertRaisesRegex(support.InstallError, "recovery failed.*recovery interrupted") as caught:
+            self.install()
+        self.assertNotIn("original files restored", str(caught.exception))
+        self.assertEqual(len(calls), 4)  # The remaining original is still restored.
+        self.assertEqual(self.snapshot(), before)
+
+    def test_keyboard_interrupt_recovery_refuses_unknown_symlink(self):
+        self.install()
+        self.binary.write_bytes(b"version two")
+        target = self.root / "unowned"
+        target.write_bytes(b"keep unknown target")
+        original_write = support.atomic_write
+        def replace_after_write(path, item):
+            original_write(path, item)
+            path.unlink()
+            path.symlink_to(target)
+            raise KeyboardInterrupt("injected after replacement")
+        with mock.patch.object(support, "atomic_write", side_effect=replace_after_write), \
+                self.assertRaisesRegex(support.InstallError, "recovery failed"):
+            self.install()
+        self.assertEqual(target.read_bytes(), b"keep unknown target")
+        self.assertTrue((self.home / support.FILES["binary"]).is_symlink())
+
     def test_upgrade_explicit_rollback_consumes_one_generation(self):
         self.install()
         first = self.installed_manifest()["current"]

@@ -127,10 +127,10 @@ def atomic_write(path, item):
 
 
 def transaction(home, changes, dry_run=False):
-    """Roll back completed writes on ordinary exceptions (not power loss).
+    """Roll back completed writes on exceptions or Ctrl-C (not SIGKILL/power loss).
 
-    Catch all ordinary exceptions so unexpected write failures also trigger
-    recovery; collect individual restore failures to attempt every remaining path.
+    Collect individual restore failures, including repeated interrupts, to attempt
+    every remaining path without claiming successful recovery.
     """
     before = {path: read_record(home, path) for path in changes}
     if dry_run:
@@ -149,7 +149,7 @@ def transaction(home, changes, dry_run=False):
             else:
                 make_parents(home, path, created)
                 atomic_write(path, item)
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         failures = []
         for path in reversed(attempted):
             try:
@@ -159,7 +159,7 @@ def transaction(home, changes, dry_run=False):
                         path.unlink()
                 else:
                     atomic_write(path, before[path])
-            except Exception as restore_error:  # noqa: BLE001
+            except (Exception, KeyboardInterrupt) as restore_error:  # noqa: BLE001
                 failures.append(f"{path}: {restore_error}")
         for directory in reversed(created):
             try:

@@ -1527,11 +1527,31 @@ class CoordinatorRegressionTests(unittest.TestCase):
         self.assertFalse(fixture.activation_controller.disable_attempted)
         self.assertEqual(json.loads(fixture.activation_state.read_text()), state)
 
+    def test_running_executable_accepts_stable_nonzero_restart_count(self):
+        self.d.service.state.side_effect = [
+            {"MainPID": "12345", "NRestarts": "1"},
+            {"MainPID": "12345", "NRestarts": "1"},
+        ]
+        with patch("deployment.digest", return_value=self.d.v01_hash) as digest:
+            self.d.running_executable()
+        self.assertEqual(self.d.service.state.call_count, 2)
+        self.assertEqual(digest.call_args_list, [
+            unittest.mock.call(Path("/proc/12345/exe")), unittest.mock.call(self.d.binary)])
+
+    def test_running_executable_rejects_increasing_nonzero_restart_count(self):
+        self.d.service.state.side_effect = [
+            {"MainPID": "12345", "NRestarts": "1"},
+            {"MainPID": "12345", "NRestarts": "2"},
+        ]
+        with patch("deployment.digest", return_value=self.d.v01_hash):
+            with self.assertRaisesRegex(RuntimeError, "Service changed during socket/executable verification"):
+                self.d.running_executable()
+
     def test_running_executable_rechecks_pid_and_restart_stability(self):
         for changed in ({"MainPID": "12346", "NRestarts": "0"},
                         {"MainPID": "12345", "NRestarts": "1"}):
             with self.subTest(confirmed=changed):
-                self.d.service.state.side_effect = [{"MainPID": "12345"}, changed]
+                self.d.service.state.side_effect = [{"MainPID": "12345", "NRestarts": "0"}, changed]
                 with patch("deployment.digest", return_value=self.d.v01_hash):
                     with self.assertRaisesRegex(RuntimeError, "Service changed during socket/executable verification"):
                         self.d.running_executable()

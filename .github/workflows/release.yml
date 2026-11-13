@@ -1,0 +1,128 @@
+name: Release bundle (draft only)
+
+on:
+  # Allows a separately approved candidate-branch push to build without merging
+  # a new workflow into main. Push events can never enter the draft job below.
+  push:
+    branches: [dev/simplified-setup]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Create a draft GitHub Release (requires existing vVERSION tag and environment approval)
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      commit: ${{ steps.metadata.outputs.commit }}
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7; same pin as offline.yml
+        with:
+          persist-credentials: false
+      - name: Read source identity and check publish tag
+        id: metadata
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, tomllib
+          import sys
+          sys.path.insert(0, 'scripts')
+          from release_bundle import validate_version
+          version = validate_version(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version'])
+          commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if os.environ['PUBLISH'] == 'true':
+              if os.environ['GITHUB_REF'] != 'refs/tags/v' + version:
+                  raise SystemExit('Draft publishing requires dispatch from the existing vVERSION tag')
+              if '-' in version:
+                  raise SystemExit('Draft release publishing requires a stable version')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\ncommit={commit}\n')
+          PY
+      - name: Prepare musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          rustup target add --toolchain stable x86_64-unknown-linux-musl
+          rustc +stable --version --verbose
+          cargo +stable --version
+          python3 --version
+      - name: Test packaging and setup offline with generated fixtures
+        run: |
+          python3 -B -m unittest discover -s scripts -p test_release_bundle.py -v
+          python3 -B -m unittest discover -s scripts -p test_setup_download.py -v
+          python3 -B -m unittest discover -s scripts -p test_setup.py -v
+      - name: Test musl target
+        run: cargo +stable test --locked --target x86_64-unknown-linux-musl --no-fail-fast
+      - name: Build prebuilt Linux x86_64 musl executable
+        run: cargo +stable build --locked --release --target x86_64-unknown-linux-musl
+      - name: Package and validate binary version
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.metadata.outputs.commit }}
+        run: |
+          python3 -B scripts/release_bundle.py \
+            --binary target/x86_64-unknown-linux-musl/release/swiftwall \
+            --output dist --version "$VERSION" --source-commit "$SOURCE_COMMIT"
+          (cd dist && sha256sum --check SHA256SUMS)
+      - name: Smoke-test the actual extracted candidate without Rust or live services
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.metadata.outputs.commit }}
+        run: |
+          python3 -B scripts/check_release_candidate.py \
+            --archive "dist/swiftwall-$VERSION-linux-x86_64.tar.gz" \
+            --checksums dist/SHA256SUMS --version "$VERSION" \
+            --source-commit "$SOURCE_COMMIT" --report dist/release-smoke.json
+      - name: Upload reviewable release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: swiftwall-linux-x86_64
+          path: |
+            dist/swiftwall-*-linux-x86_64.tar.gz
+            dist/SHA256SUMS
+            dist/release-smoke.json
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+    needs: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Repository administrators MUST configure required reviewers on this environment.
+    environment: release-draft
+    permissions:
+      contents: write
+    steps:
+      - name: Download only this run's tested bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: swiftwall-linux-x86_64
+          path: dist
+      - name: Create draft only; never edit or replace an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.bundle.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.bundle.outputs.commit }}
+        run: |
+          (cd dist && sha256sum --check SHA256SUMS)
+          printf '%s\n' \
+            "Draft only: Linux x86_64 musl bundle from commit $SOURCE_COMMIT." \
+            'See bundled docs/RELEASES.md for verification and limitations.' \
+            'SHA256SUMS provides same-origin integrity, not a signature.' \
+            'Build provenance is not a byte-reproducibility guarantee.' > notes.md
+          gh release create "v$VERSION" \
+            "dist/swiftwall-$VERSION-linux-x86_64.tar.gz" dist/SHA256SUMS \
+            --verify-tag --draft --title "SwiftWall $VERSION" --notes-file notes.md

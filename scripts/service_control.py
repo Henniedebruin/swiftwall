@@ -7,6 +7,7 @@ by these userspace deadlines.
 """
 
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -69,8 +70,11 @@ class UserService:
         if query_failed:
             raise ServiceError("environment-unverified", "Cannot inspect loaded unit environment")
         values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-        if result.returncode or any(key not in values for key in properties):
+        if result.returncode or any(key not in values for key in properties if key != "EnvironmentFiles"):
             raise ServiceError("environment-unverified", "Cannot inspect loaded unit environment")
+        if "EnvironmentFiles" not in values:
+            self._verify_no_environment_files()
+            values["EnvironmentFiles"] = ""
         if any(values[key] for key in properties[1:]):
             raise ServiceError("environment-unverified", "Use explicit Environment= values; EnvironmentFiles, pass/unset and PAM are unsupported")
         ambiguous = False
@@ -90,6 +94,32 @@ class UserService:
         if mismatched or unexpected:
             # Do not echo untrusted names or values from the service environment.
             raise ServiceError("environment-mismatch", "Required values differ or unsupported SWIFTWALL_ overrides")
+
+    def _verify_no_environment_files(self):
+        # systemd 262 show can omit an empty a(sb), even with --all. Prove
+        # emptiness through Properties.Get instead; absence is never evidence.
+        verified = False
+        try:
+            loaded = self.command([
+                "busctl", "--user", "call", "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                "LoadUnit", "s", self.unit,
+            ])
+            # LoadUnit resolves aliases and also handles garbage-collected inactive
+            # units. It loads configuration only, never starts the service.
+            path = re.fullmatch(r'o "(/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+)"',
+                                loaded.stdout.strip())
+            if loaded.returncode == 0 and path:
+                files = self.command([
+                    "busctl", "--user", "get-property", "org.freedesktop.systemd1",
+                    path.group(1), "org.freedesktop.systemd1.Service", "EnvironmentFiles",
+                ])
+                verified = files.returncode == 0 and files.stdout.strip() == "a(sb) 0"
+        except Exception:
+            # Neither command output nor runner exceptions may expose environment.
+            pass
+        if not verified:
+            raise ServiceError("environment-unverified", "Cannot prove loaded unit EnvironmentFiles is empty")
 
     def stop(self):
         # Preserve enabled/disabled state. Stop waits for shutdown, within a bound.

@@ -306,6 +306,74 @@ class PluginInstallTests(unittest.TestCase):
                     self.assertEqual(before, snapshot(self.home))
                     self.run_operation("verify")
 
+    def test_keyboard_interrupt_restores_first_install_after_each_mutation_phase(self):
+        for phase in ("staged", "old-moved", "new-placed", "metadata-written"):
+            before = snapshot(self.home)
+            def interrupt(name):
+                if name == phase:
+                    raise KeyboardInterrupt("injected primary interrupt")
+            with self.subTest(phase=phase), \
+                    mock.patch.object(support, "checkpoint", side_effect=interrupt), \
+                    self.assertRaisesRegex(support.InstallError, "original files restored") as caught:
+                self.run_operation()
+            self.assertIsInstance(caught.exception.__cause__, KeyboardInterrupt)
+            self.assertEqual(snapshot(self.home), before)
+
+    def test_keyboard_interrupt_restores_update_uninstall_and_rollback(self):
+        self.install_update()
+        self.update_source()
+        for operation in ("install", "uninstall", "rollback"):
+            for phase in ("staged", "old-moved", "new-placed", "metadata-written"):
+                before = snapshot(self.home)
+                def interrupt(name):
+                    if name == phase:
+                        raise KeyboardInterrupt("injected primary interrupt")
+                with self.subTest(operation=operation, phase=phase), \
+                        mock.patch.object(support, "checkpoint", side_effect=interrupt), \
+                        self.assertRaisesRegex(support.InstallError, "original files restored"):
+                    self.run_operation(operation)
+                self.assertEqual(snapshot(self.home), before)
+                self.run_operation("verify")
+
+    def test_repeated_keyboard_interrupt_retains_original_backup(self):
+        self.install_update()
+        before = snapshot(self.destination)
+        old_metadata = self.state.read_bytes()
+        self.update_source()
+        original_rename = support.rename_noreplace
+        def interrupt_primary(name):
+            if name == "new-placed":
+                raise KeyboardInterrupt("primary interrupted")
+        def interrupt_recovery(source, destination):
+            if destination.name == "failed-new":
+                raise KeyboardInterrupt("recovery interrupted")
+            original_rename(source, destination)
+        with mock.patch.object(support, "checkpoint", side_effect=interrupt_primary), \
+                mock.patch.object(support, "rename_noreplace", side_effect=interrupt_recovery), \
+                self.assertRaisesRegex(support.InstallError, "recovery failed.*recovery interrupted.*backup retained") as caught:
+            self.run_operation()
+        self.assertNotIn("original files restored", str(caught.exception))
+        backups = list(self.state.parent.glob(".plugin-transaction-*/old"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(snapshot(backups[0]), before)
+        self.assertEqual(self.state.read_bytes(), old_metadata)
+
+    def test_keyboard_interrupt_preserves_unknown_published_paths_and_backup(self):
+        self.install_update()
+        before = snapshot(self.destination)
+        self.update_source()
+        def add_unknown_and_interrupt(name):
+            if name == "new-placed":
+                (self.destination / "unknown.txt").write_bytes(b"keep unknown path")
+                raise KeyboardInterrupt("primary interrupted")
+        with mock.patch.object(support, "checkpoint", side_effect=add_unknown_and_interrupt), \
+                self.assertRaisesRegex(support.InstallError, "backup retained"):
+            self.run_operation()
+        self.assertEqual((self.destination / "unknown.txt").read_bytes(), b"keep unknown path")
+        backups = list(self.state.parent.glob(".plugin-transaction-*/old"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(snapshot(backups[0]), before)
+
     def test_staging_write_failure_cleans_created_paths(self):
         before = snapshot(self.home)
         with mock.patch.object(support, "write_record", side_effect=OSError("disk full")):

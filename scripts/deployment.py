@@ -160,7 +160,8 @@ class Deployment:
         self.record("socket_owner", pid=pid, uid=uid, path=str(self.control_socket))
 
     def running_executable(self):
-        pid = int(self.service.state()["MainPID"])
+        before = self.service.state()
+        pid = int(before["MainPID"])
         if not pid:
             raise RuntimeError("Service has no running executable")
         # --version describes the disk binary, not necessarily the running one.
@@ -168,7 +169,7 @@ class Deployment:
         if running_hash != digest(self.binary):
             raise RuntimeError("Running executable differs from installed engine")
         confirmed = self.service.state()
-        if int(confirmed["MainPID"]) != pid or confirmed["NRestarts"] != "0":
+        if int(confirmed["MainPID"]) != pid or confirmed["NRestarts"] != before["NRestarts"]:
             raise RuntimeError("Service changed during socket/executable verification")
         self.record("running_executable_verified", pid=pid, sha256=running_hash)
 
