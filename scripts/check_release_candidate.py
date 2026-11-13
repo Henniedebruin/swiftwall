@@ -7,6 +7,7 @@ The static ELF verifier checks shape, not musl provenance; the build must supply
 that provenance. Successful smoke always executes the actual extracted binary.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import tempfile
 import time
 import zlib
 from contextlib import contextmanager
+from itertools import chain
 from pathlib import Path
 
 # Support imports must not leave source-tree bytecode behind either.
@@ -106,17 +108,22 @@ def run(argv, cwd, env):
             stop_reap(process)
         output.seek(0)
         raw = output.read(MAX_OUTPUT + 1)
-    require(process.returncode == 0, 'Extracted command failed: ' + str(argv[-1]))
+    require(process.returncode == 0, 'Extracted command failed: ' + str(argv[-1])
+            + ' (exit ' + str(process.returncode) + '): '
+            + raw[:4096].decode('utf-8', errors='replace'))
     require(len(raw) <= MAX_OUTPUT, 'Extracted command exceeded output limit')
     return raw.decode('utf-8')
 
 
 def clean_environment(root):
     """Return an allowlisted environment, never a copy of the caller's session."""
-    paths = {key: root / name for key, name in (
-        ('HOME', 'home'), ('XDG_CONFIG_HOME', 'config'), ('XDG_STATE_HOME', 'state'),
+    home = root / 'home'
+    # The ordinary setup CLI supports home-local config/state. Sibling XDG roots
+    # are an invalid user environment, not a valid clean-user installation test.
+    paths = {'HOME': home, **{key: home / name for key, name in (
+        ('XDG_CONFIG_HOME', 'config'), ('XDG_STATE_HOME', 'state'),
         ('XDG_DATA_HOME', 'data'), ('XDG_CACHE_HOME', 'cache'),
-        ('XDG_RUNTIME_DIR', 'runtime'), ('TMPDIR', 'tmp'), ('PATH', 'tools'))}
+        ('XDG_RUNTIME_DIR', 'runtime'))}, 'TMPDIR': root / 'tmp', 'PATH': root / 'tools'}
     for path in paths.values():
         path.mkdir(mode=0o700)
     # No cargo/rustc, shell, systemctl, busctl, Omarchy or Quickshell in PATH.
@@ -124,6 +131,29 @@ def clean_environment(root):
     return {**{key: str(path) for key, path in paths.items()},
             'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
             'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1'}
+
+
+def user_tree(env):
+    keys = ('HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME',
+            'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR')
+    result = {}
+    for key in keys:
+        root = Path(env[key])
+        records = {}
+        for path in chain((root,), root.rglob('*')):
+            require(len(records) < 256, 'Unexpectedly large dry-run filesystem tree')
+            info = path.lstat()
+            content = None
+            if stat.S_ISREG(info.st_mode):
+                require(info.st_size <= MAX_OUTPUT, 'Unexpectedly large dry-run file')
+                content = hashlib.sha256(path.read_bytes()).hexdigest()
+            elif stat.S_ISLNK(info.st_mode):
+                content = os.readlink(path)
+            records[str(path.relative_to(root))] = (
+                info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_mtime_ns, content)
+        result[key] = records
+    return result
 
 
 def png(rgb):
@@ -280,6 +310,7 @@ def check_candidate(archive, checksums, version, source_commit):
         require(verified == inventory and verified['source_commit'] == source_commit
                 and verified['target'] == TARGET, 'Release source commit/target identity mismatch')
         env = clean_environment(root)
+        initial_user_tree = user_tree(env)
         cwd = root / 'unrelated'
         cwd.mkdir(mode=0o700)
         binary = bundle / 'bin/swiftwall'
@@ -293,9 +324,7 @@ def check_candidate(archive, checksums, version, source_commit):
         require(dry.get('operation') == 'install' and dry.get('dry_run') is True
                 and dry.get('downloads') is False and dry.get('changes') is False,
                 'Launcher did not return a safe dry-run plan')
-        require(all(not list(Path(env[key]).iterdir()) for key in
-                    ('HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME',
-                     'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR')), 'Launcher dry-run wrote private user data')
+        require(user_tree(env) == initial_user_tree, 'Launcher dry-run wrote private user data')
         daemon = daemon_smoke(binary, root, cwd, env, version)
         verify_directory(bundle, version)  # No modified helpers or bytecode left behind.
         return {'schema': 1, 'ok': True, 'scope': 'archive/binary/launcher',

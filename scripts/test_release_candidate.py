@@ -200,6 +200,40 @@ class CandidateTests(unittest.TestCase):
                     self.assertEqual(len(zlib.decompress(payload)), 4)
                 offset += length + 12
 
+    def test_real_packaged_launcher_dry_run_uses_supported_clean_user_xdg_paths(self):
+        # Real launcher/modules, generated non-executed ELF only. This is a CLI
+        # regression for the CI environment bug, NOT musl artifact acceptance.
+        source = Path(__file__).resolve().parents[1]
+        binary = self.root / 'cli-only-elf'
+        binary.write_bytes(minimal_elf())
+        binary.chmod(0o755)
+        with patch.object(bundle, 'binary_version', return_value=VERSION):
+            archive, sums = bundle.build_bundle(source, binary, self.root / 'real-cli-out', VERSION, COMMIT)
+        digest = download.checksum(sums.read_text(), archive.name)
+        extracted, _ = download.unpack(archive, self.root / 'real-cli-bundle', VERSION, digest)
+        environment_root = self.root / 'clean-user'
+        environment_root.mkdir(mode=0o700)
+        env = smoke.clean_environment(environment_root)
+        other = self.root / 'unrelated-cwd'
+        other.mkdir()
+        for key in ('XDG_CONFIG_HOME', 'XDG_STATE_HOME'):
+            self.assertTrue(Path(env[key]).is_relative_to(Path(env['HOME'])))
+        sentinel = Path(env['HOME']) / 'unchanged-user-file'
+        sentinel.write_text('original fixture')
+        before = smoke.user_tree(env)
+        output = smoke.run([extracted / 'swiftwall-setup', 'install', '--dry-run'], other, env)
+        self.assertTrue(json.loads(output)['dry_run'])
+        self.assertEqual(smoke.user_tree(env), before)
+        sentinel.write_text('changed fixture')
+        self.assertNotEqual(smoke.user_tree(env), before)
+        changed = smoke.user_tree(env)
+        sentinel.chmod(0o400)
+        self.assertNotEqual(smoke.user_tree(env), changed)
+        (Path(env['XDG_CONFIG_HOME']) / 'unexpected').write_text('fixture')
+        self.assertNotEqual(smoke.user_tree(env), before)
+        self.assertEqual(list(Path(env['HOME']).rglob('config.toml')), [])
+        self.assertFalse((Path(env['HOME']) / '.local/bin/swiftwall').exists())
+
     def test_fake_setter_accepts_only_exact_fixture_paths(self):
         env = smoke.clean_environment(self.root)
         env, _, link, calls, images = smoke.daemon_fixture(self.root, env)

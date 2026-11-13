@@ -67,6 +67,7 @@ jobs:
       - name: Build prebuilt Linux x86_64 musl executable
         run: cargo +stable build --locked --release --target x86_64-unknown-linux-musl
       - name: Package and validate binary version
+        id: package
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
           SOURCE_COMMIT: ${{ steps.metadata.outputs.commit }}
@@ -84,7 +85,8 @@ jobs:
             --archive "dist/swiftwall-$VERSION-linux-x86_64.tar.gz" \
             --checksums dist/SHA256SUMS --version "$VERSION" \
             --source-commit "$SOURCE_COMMIT" --report dist/release-smoke.json
-      - name: Upload reviewable release assets
+      - name: Upload candidate and diagnostics even if smoke fails
+        if: ${{ always() && steps.package.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: swiftwall-linux-x86_64

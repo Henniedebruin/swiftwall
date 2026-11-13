@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 import signal
 import subprocess
+import tempfile
+import time
 
 from evidence_support import private_evidence_directory, private_evidence_log
 
@@ -40,21 +42,41 @@ class ActivationError(RuntimeError):
 
 
 def process(args, *, env, timeout, **kwargs):
-    """Reap the caller and its command descendants before state reconciliation."""
-    child = subprocess.Popen(args, env=env, start_new_session=True,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True)
-    try:
-        stdout, stderr = child.communicate(timeout=timeout)
-        return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
-    finally:
-        # The client can time out after delivery. This stops only local commands;
-        # it cannot cancel a request already executing in Quickshell.
+    """Reserve the leader PID until group cleanup, then reap before reconciliation."""
+    # Files cannot fill a pipe while we wait without reaping. Capture at most
+    # 1 Mi characters per stream (bytes on timeout); temporary disk use is uncapped.
+    capture_limit = 1024 * 1024
+    with tempfile.TemporaryFile(mode="w+t") as stdout, tempfile.TemporaryFile(mode="w+t") as stderr:
+        deadline = time.monotonic() + timeout
+        child = subprocess.Popen(args, env=env, start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=stdout,
+                                 stderr=stderr, text=True)
+        timed_out = False
         try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.communicate(timeout=2)
+            while os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                time.sleep(min(0.01, remaining))
+        finally:
+            # WNOWAIT keeps even an exited leader's PID reserved through killpg.
+            # This stops local commands, not requests already executing remotely.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                child.wait(timeout=2)
+        stdout.seek(0)
+        stderr.seek(0)
+        if timed_out:
+            # Like communicate(), TimeoutExpired carries bytes even in text mode.
+            raise subprocess.TimeoutExpired(args, timeout,
+                                            output=stdout.buffer.read(capture_limit),
+                                            stderr=stderr.buffer.read(capture_limit))
+        return subprocess.CompletedProcess(args, child.returncode,
+                                           stdout.read(capture_limit), stderr.read(capture_limit))
 
 
 def without_plugin(config, plugin_id=PLUGIN_ID):

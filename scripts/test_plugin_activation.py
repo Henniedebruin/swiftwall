@@ -685,6 +685,124 @@ else:
 '''
 
 
+class ProcessCleanupTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="swiftwall-process-cleanup-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.command = self.root / "private-command"
+        self.command.write_text('''#!/usr/bin/python3
+import os
+import sys
+import time
+
+size = int(sys.argv[2])
+sys.stdout.write("o" * size + "\\\\n")
+sys.stderr.write("e" * size + "\\\\n")
+sys.stdout.flush()
+sys.stderr.flush()
+# Keep inherited output descriptors open after the leader's normal exit.
+if os.fork() == 0:
+    time.sleep(30)
+    os._exit(0)
+if sys.argv[1] == "timeout":
+    time.sleep(30)
+os._exit(7)
+''')
+        self.command.chmod(0o700)
+        self.env = {"HOME": str(self.root), "PATH": str(self.root)}
+
+    def run_checked(self, mode, size=256 * 1024):
+        events = []
+        children = []
+        real_popen = subprocess.Popen
+        real_killpg = os.killpg
+        real_waitid = os.waitid
+
+        def observe(idtype, pid, options):
+            self.assertEqual(idtype, os.P_PID)
+            self.assertEqual(options, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            result = real_waitid(idtype, pid, options)
+            events.append(("observe", result))
+            return result
+
+        def private_popen(args, **kwargs):
+            self.assertEqual(args[0], str(self.command))
+            self.assertEqual(kwargs["env"], self.env)
+            self.assertTrue(kwargs["start_new_session"])
+            self.assertFalse(kwargs.get("shell", False))
+            child = real_popen(args, **kwargs)
+            children.append(child)
+            original_wait, original_poll = child.wait, child.poll
+
+            def wait(*args, **kwargs):
+                self.assertIn("killpg", [event[0] for event in events])
+                events.append(("wait", None))
+                return original_wait(*args, **kwargs)
+
+            def poll(*args, **kwargs):
+                self.assertIn("killpg", [event[0] for event in events])
+                return original_poll(*args, **kwargs)
+
+            child.wait = wait
+            child.poll = poll
+            child.communicate = mock.Mock(side_effect=AssertionError("communicate may reap"))
+            return child
+
+        def killpg(pid, sig):
+            self.assertEqual(pid, children[0].pid)
+            self.assertEqual(sig, activation.signal.SIGKILL)
+            self.assertIsNone(children[0].returncode)
+            # Inspect the actual child, not just mocked method ordering: it must
+            # still be waitable (or running), never already reaped at cleanup.
+            status = real_waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if mode == "normal":
+                self.assertIsNotNone(status)
+                self.assertEqual(status.si_status, 7)
+            else:
+                self.assertIsNone(status)
+            events.append(("killpg", status))
+            real_killpg(pid, sig)
+
+        args = [str(self.command), mode, str(size)]
+        started = time.monotonic()
+        with mock.patch.object(subprocess, "Popen", side_effect=private_popen), \
+                mock.patch.object(os, "killpg", side_effect=killpg), \
+                mock.patch.object(os, "waitid", side_effect=observe):
+            if mode == "timeout":
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    activation.process(args, env=self.env, timeout=0.5)
+                result = caught.exception
+                self.assertEqual(result.cmd, args)
+                self.assertEqual(result.timeout, 0.5)
+                self.assertEqual(result.output, b"o" * size + b"\\n")
+                self.assertEqual(result.stderr, b"e" * size + b"\\n")
+            else:
+                result = activation.process(args, env=self.env, timeout=3)
+                self.assertIsInstance(result, subprocess.CompletedProcess)
+                self.assertEqual(result.args, args)
+                self.assertEqual(result.returncode, 7)
+                limit = 1024 * 1024
+                self.assertEqual(result.stdout, ("o" * size + "\\n")[:limit])
+                self.assertEqual(result.stderr, ("e" * size + "\\n")[:limit])
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([event[0] for event in events].count("wait"), 1)
+        self.assertEqual([event[0] for event in events].count("killpg"), 1)
+        self.assertTrue(any(event[0] == "observe" for event in events))
+        children[0].communicate.assert_not_called()
+        with self.assertRaises(ChildProcessError):
+            real_waitid(os.P_PID, children[0].pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+
+    def test_normal_exit_kills_group_before_reaping_leader(self):
+        self.run_checked("normal")
+
+    def test_timeout_kills_group_before_reaping_leader(self):
+        self.run_checked("timeout")
+
+    def test_file_capture_is_limited_without_pipe_deadlock(self):
+        self.run_checked("normal", size=2 * 1024 * 1024)
+
+
 class PrivateProcessTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="swiftwall-activation-process-")
