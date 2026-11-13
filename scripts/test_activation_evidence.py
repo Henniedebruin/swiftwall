@@ -92,7 +92,7 @@ class ActivationEvidenceTests(unittest.TestCase):
             controller = OmarchyActivation(home=home, evidence=evidence, runner=runner)
             env = {key: str(root / key) for key in ENGINE_ENVIRONMENT}
             env["HOME"] = str(home)
-            Deployment(home=home, unit="private-fixture.service", env=env,
+            Deployment(target_version="0.2.0-dev", home=home, unit="private-fixture.service", env=env,
                        v01_hash="unused", v02=artifact, v02_hash="unused",
                        plugin_source=root, backup_root=root / "backup",
                        evidence=evidence, activation_controller=controller)

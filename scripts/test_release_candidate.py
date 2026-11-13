@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import tomllib
 import unittest
 import zlib
 from pathlib import Path
@@ -209,10 +210,12 @@ class CandidateTests(unittest.TestCase):
         binary = self.root / 'cli-only-elf'
         binary.write_bytes(minimal_elf())
         binary.chmod(0o755)
-        with patch.object(bundle, 'binary_version', return_value=VERSION):
-            archive, sums = bundle.build_bundle(source, binary, self.root / 'real-cli-out', VERSION, COMMIT)
+        version = tomllib.loads((source / 'Cargo.toml').read_text())['package']['version']
+        self.assertEqual(json.loads((source / 'manifest.json').read_text())['version'], version)
+        with patch.object(bundle, 'binary_version', return_value=version):
+            archive, sums = bundle.build_bundle(source, binary, self.root / 'real-cli-out', version, COMMIT)
         digest = download.checksum(sums.read_text(), archive.name)
-        extracted, _ = download.unpack(archive, self.root / 'real-cli-bundle', VERSION, digest)
+        extracted, _ = download.unpack(archive, self.root / 'real-cli-bundle', version, digest)
         environment_root = self.root / 'clean-user'
         environment_root.mkdir(mode=0o700)
         env = smoke.clean_environment(environment_root)

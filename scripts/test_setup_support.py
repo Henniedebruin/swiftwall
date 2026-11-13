@@ -382,6 +382,115 @@ class SetupTests(unittest.TestCase):
         self.assertEqual({name: (root / name).stat().st_ino for name in plugin.FILES}, inodes)
         self.assertEqual(self.activation.activations, 1)
 
+    def test_owned_dev_to_stable_metadata_update_preserves_state_without_reenable(self):
+        self.release_version('0.2.0-dev')
+        self.install(widget=True)
+        config = CONFIG + b'# preserved dev installation config\n'
+        self.manager.config.write_bytes(config)
+        state = self.state(paused=True)
+        original = plugin.load_manifest(self.home)
+        assert original is not None
+        activation = self.activation.snapshot()
+        receipt = (self.home / ACTIVATION).read_bytes()
+        self.release_version('0.2.0')
+        before = self.tree()
+        self.transport.calls.clear()
+        plan = self.manager.plan('update')
+        self.assertEqual(plan['plugin'], 'metadata-only update')
+        self.assertEqual(plan['plugin_version'], '0.2.0-dev')
+        self.assertEqual(self.tree(), before)
+        self.assertFalse(self.transport.calls)
+        with (patch.object(self.activation, 'activate', side_effect=AssertionError('No repeated enable')),
+              patch.object(self.activation, 'deactivate', side_effect=AssertionError('No disable'))):
+            report = self.manager.update()
+        self.assertEqual(report['plugin'], 'metadata-only update')
+        current = plugin.load_manifest(self.home)
+        assert current is not None
+        engine.verify_owned(self.home, engine.load_manifest(self.home))
+        plugin.verify_owned(self.home, current)
+        self.assertEqual(current['previous'], original['current'])
+        for name in plugin.FILES[1:]:
+            self.assertEqual(current['current'][name], original['current'][name])
+        self.assertEqual((self.home / plugin.DESTINATION / 'manifest.json').read_bytes(),
+                         (self.bundle / 'manifest.json').read_bytes())
+        self.assertEqual(self.manager._version(), '0.2.0')
+        self.assertEqual(self.manager.plan('status')['plugin_version'], '0.2.0')
+        self.assertEqual(self.manager.config.read_bytes(), config)
+        self.assertEqual(self.manager.state.read_bytes(), state)
+        self.assertEqual(self.activation.snapshot(), activation)
+        self.assertEqual((self.home / ACTIVATION).read_bytes(), receipt)
+        self.assertEqual(self.activation.activations, 1)
+        self.assertFalse(self.activation.disable_attempted)
+        self.assertTrue(self.transport.active)
+        self.assertTrue(self.transport.enabled)
+        self.assertEqual(self.manager._wallpaper(), str(self.image))
+        self.assertFalse(any(a[0] == 'systemctl' and a[2] in ('enable', 'disable')
+                             for a, _ in self.transport.calls))
+
+    def test_owned_dev_to_stable_rollback_restores_receipts_and_latest_valid_history(self):
+        self.release_version('0.2.0-dev')
+        self.install(widget=True)
+        config = CONFIG + b'# original dev installation config\n'
+        self.manager.config.write_bytes(config)
+        self.state(paused=True)
+        original_engine = engine.load_manifest(self.home)
+        original_plugin = plugin.load_manifest(self.home)
+        receipts = {path: (self.home / path).read_bytes()
+                    for path in (engine.MANIFEST, plugin.MANIFEST, ACTIVATION)}
+        activation = self.activation.snapshot()
+        self.release_version('0.2.0')
+        self.manager.update()
+        latest = self.state(paused=False, carousel={
+            'paths': ['a', 'b', 'c'], 'bag': ['b', 'a'],
+            'history': ['a', 'b', 'c', 'a'], 'cursor': 3})
+        self.manager.config.write_bytes(CONFIG + b'# changed after stable update\n')
+        self.transport.calls.clear()
+        with (patch.object(self.activation, 'activate', side_effect=AssertionError('No repeated enable')),
+              patch.object(self.activation, 'deactivate', side_effect=AssertionError('No disable'))):
+            self.assertTrue(self.manager.rollback()['restored'])
+        self.assertEqual(engine.load_manifest(self.home), original_engine)
+        self.assertEqual(plugin.load_manifest(self.home), original_plugin)
+        engine.verify_owned(self.home, original_engine)
+        plugin.verify_owned(self.home, original_plugin)
+        for path, receipt in receipts.items():
+            self.assertEqual((self.home / path).read_bytes(), receipt)
+        self.assertEqual(self.manager._version(), '0.2.0-dev')
+        self.assertEqual(self.manager.plan('status')['plugin_version'], '0.2.0-dev')
+        self.assertEqual(self.manager.config.read_bytes(), config)
+        self.assertEqual(self.manager.state.read_bytes(), latest)
+        self.assertEqual(self.activation.snapshot(), activation)
+        self.assertEqual(self.activation.activations, 1)
+        self.assertFalse(self.activation.disable_attempted)
+        self.assertTrue(self.transport.active)
+        self.assertTrue(self.transport.enabled)
+        self.assertEqual(self.manager._wallpaper(), str(self.image))
+        self.assertFalse(any(a[0] == 'systemctl' and a[2] in ('enable', 'disable')
+                             for a, _ in self.transport.calls))
+
+    def test_owned_dev_to_stable_changed_qml_refused_before_mutation(self):
+        self.release_version('0.2.0-dev')
+        self.install(widget=True)
+        self.state()
+        self.release_version('0.2.0')
+        path = self.bundle / 'plugin/Service.qml'
+        path.write_bytes(path.read_bytes() + b'\n// changed dev-to-stable QML fixture\n')
+        before = self.tree()
+        activation = self.activation.snapshot()
+        self.transport.calls.clear()
+        with (patch.object(self.activation, 'activate', side_effect=AssertionError('No repeated enable')),
+              patch.object(self.activation, 'deactivate', side_effect=AssertionError('No disable'))):
+            for operation in (lambda: self.manager.plan('update'), self.manager.update):
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaisesRegex(SetupError, 'QML URL caching'):
+                        operation()
+                    self.assertEqual(self.tree(), before)
+                    self.assertFalse(self.transport.calls)
+                    self.assertEqual(self.activation.snapshot(), activation)
+                    self.assertEqual(self.activation.activations, 1)
+                    self.assertFalse(self.activation.disable_attempted)
+                    self.assertTrue(self.transport.active)
+                    self.assertTrue(self.transport.enabled)
+
     def test_v02_license_and_description_upgrade_without_version_change_is_supported(self):
         self.release_version('0.2.0')
         path = self.bundle / 'manifest.json'

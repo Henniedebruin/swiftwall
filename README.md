@@ -7,10 +7,14 @@ resume, go back or skip ahead from the pop-out panel.
 SwiftWall uses Omarchy's existing wallpaper renderer. It does not replace the
 backend, modify original images, or require changes to SwiftView.
 
-## Quick Install
+## Planned stable 0.2.0 Quick Install
 
-**Release candidate preparation: no downloadable release has been published yet.**
-Once an approved Linux x86_64 release is available:
+**Local preparation only: no stable 0.2.0 musl release archive or checksum has been
+built or published.** A native GNU release binary reports `swiftwall 0.2.0`; local
+implementation and local validation are complete. This is not acceptance of a new
+stable musl release artifact; see the [validation record](docs/STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
+The instructions below are planned, not currently available stable downloads.
+Once an approved Linux x86_64 stable release is published:
 
 1. Download its archive and `SHA256SUMS` from
    [GitHub Releases](https://github.com/Henniedebruin/swiftwall/releases) into a new folder.
@@ -27,8 +31,9 @@ Once an approved Linux x86_64 release is available:
 The wizard asks for wallpaper folders, offers five-minute shuffle rotation, and
 asks before making changes. **No Rust compiler, Cargo or repository clone is needed.**
 Run as your normal Omarchy user, not with sudo. Keep the extracted folder for updates
-and removal. Requirements: Python 3.11+, systemd/Omarchy tools, PyGObject/Gio and a
-working XDG folder chooser. See [full setup and recovery instructions](docs/SETUP.md).
+and removal: the portable helper is not installed into PATH or silently self-updated.
+Download and verify a newer bundle to obtain newer helper code. Requirements:
+Python 3.11+, systemd/Omarchy tools, PyGObject/Gio and a working XDG folder chooser. See [full setup and recovery instructions](docs/SETUP.md).
 
 Until a release is approved, [building from source](docs/ADVANCED_INSTALL.md) remains
 an advanced alternative—not a requirement for the planned prebuilt installation.
@@ -91,7 +96,10 @@ The setup tool installs nothing system-wide, uses no `curl | bash`, checks exact
 release checksums and payload inventories, refuses modified/unowned files, creates
 verified backups, and uses bounded service/activation readiness checks. Ordinary
 failures attempt one recovery. It never silently adopts another installer's plugin
-files. Whole-process interruption and power loss can still require manual recovery.
+files. Cross-process rollback is manual: there is no automatic cross-process
+`rollback` CLI. Whole-process interruption and power loss require inspecting retained
+private backups before recovery; never overwrite the current wallpaper with an old
+snapshot.
 
 Checksums provide integrity, not an independent publisher signature. Build provenance
 and release approval are described in [RELEASES.md](docs/RELEASES.md). The daemon
@@ -101,9 +109,10 @@ remains a small native Rust utility; Python setup/picker helpers run only on dem
 
 [SwiftWall is listed on the Omarchy Plugin Marketplace](https://plugins.omarchy.org/plugin.html?id=io.github.henniedebruin.swiftwall).
 Its **Manual setup** label remains appropriate: the marketplace installs a plugin,
-not the mandatory Rust daemon and user service. The release helper simplifies that
-separate step; it does not change official eligibility. Do not install the same
-plugin directory through both Omarchy's Git manager and SwiftWall setup. See the
+not the mandatory Rust daemon and user service. The planned prebuilt release helper
+simplifies that separate step without Cargo; it does not change official eligibility
+or adopt marketplace-owned plugin files. Do not install the same plugin directory
+through both Omarchy's Git manager and SwiftWall setup. See the
 [marketplace contract review](docs/MARKETPLACE_INSTALLATION.md).
 
 ## Development and troubleshooting

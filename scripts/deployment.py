@@ -23,6 +23,7 @@ from plugin_activation import OmarchyActivation
 # Re-export for existing rehearsal callers; activation uses the same safe writer.
 from evidence_support import private_evidence_directory, private_evidence_log
 import install_support
+from release_bundle import validate_version
 
 
 PLUGIN_ID = "io.github.henniedebruin.swiftwall"
@@ -42,9 +43,10 @@ def private_command_output(args):
 
 
 class Deployment:
-    def __init__(self, *, home, unit, env, v01_hash, v02, v02_hash,
+    def __init__(self, *, target_version, home, unit, env, v01_hash, v02, v02_hash,
                  plugin_source, backup_root, evidence, activate=None, deactivate=None,
                  readiness_timeout=10, runner=subprocess.run, activation_controller=None):
+        self.target_version = validate_version(target_version)
         self.home = Path(home).resolve(strict=True)
         self.env = dict(env)
         self.engine_environment = {key: self.env[key] for key in ENGINE_ENVIRONMENT}
@@ -286,7 +288,7 @@ class Deployment:
             if unit.read_bytes() != (self.backup / "unit").read_bytes():
                 self.command(["systemctl", "--user", "daemon-reload"])
             self.start_service()
-            reply = self.healthy("0.2.0-dev", 1)
+            reply = self.healthy(self.target_version, 1)
             self.verify_recovery(reply)
             settings = json.loads(self.command([str(self.binary), "settings"]))
             self.record("settings", reply=settings)

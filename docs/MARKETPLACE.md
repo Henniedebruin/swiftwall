@@ -1,8 +1,19 @@
-# Omarchy marketplace preparation
+# Omarchy marketplace status and stable preparation
 
-SwiftWall is being prepared for public distribution. It is **not listed or
-approved** merely because this document exists. The current development manifest
-is not a stable-release declaration.
+[SwiftWall is listed on the Omarchy Plugin Marketplace](https://plugins.omarchy.org/plugin.html?id=io.github.henniedebruin.swiftwall).
+Its **Manual setup** label remains legitimate: the marketplace installs plugin
+files, not the required companion daemon and user service. Listing verification
+covers the exact reviewed snapshot, not every later upstream commit or release.
+
+**Stable 0.2.0 is local preparation only.** Local implementation and local validation
+are complete; see the [validation record](STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
+This is not new stable musl artifact acceptance. A native GNU release binary reports
+`swiftwall 0.2.0`; no stable musl release archive or checksum has been built or
+published.
+The [planned prebuilt quick install](SETUP.md#planned-stable-020-quick-install)
+will require no Rust compiler, Cargo or repository clone once approved assets are
+published. It does not reclassify marketplace eligibility or establish verification
+of the stable snapshot.
 
 Official references:
 - <https://plugins.omarchy.org/publish.html>
@@ -14,11 +25,11 @@ Official references:
 - Repository: <https://github.com/Henniedebruin/swiftwall>
 - Permanent plugin ID: `io.github.henniedebruin.swiftwall`
 - License: [MIT](../LICENSE)
-- Proposed category: `Appearance`
-- Proposed tags: `bar`, `hyprland`, `quickshell`
+- Submission category: `Appearance`
+- Submission tags: `bar`, `hyprland`, `quickshell`
 
-Check ID availability against the current marketplace before submitting; names
-from retired listings may remain reserved.
+Keep the existing plugin identity and submission issue; do not open a duplicate
+submission for stable 0.2.0.
 
 ## Manual engine setup is required
 
@@ -26,7 +37,9 @@ SwiftWall is not just QML. The plugin connects to a separately built Rust daemon
 Installing the plugin files alone does **not** build, start or enable that daemon.
 No install hooks silently execute source code or enable a service.
 
-Follow the [engine installation guide](../packaging/INSTALL.md) and then the
+See [setup and recovery](SETUP.md) for the planned prebuilt path. Source/manual
+installation remains an advanced alternative: follow the
+[engine installation guide](../packaging/INSTALL.md) and then the
 [plugin installation guide](../packaging/PLUGIN_INSTALL.md). These cover
 configuration, file ownership, activation, updates, removal and rollback.
 The daemon requires Linux and the documented Omarchy wallpaper interface.
@@ -39,7 +52,37 @@ repository contains installers and user-service management tooling; those are
 expected review capabilities, not claims of a capability-free security scan.
 Do not remove or disguise those capabilities to obtain a passing scan.
 
-## Publication gates
+## Stable 0.2.0 boundaries and approval gates
+
+- The helper refuses marketplace-owned/Git-managed plugin files; it does not adopt
+  them. Do not use both managers on the same plugin directory. Inspect and plan a
+  deliberate migration before changing ownership.
+- Changed QML/helper payloads and structural plugin updates are blocked before
+  mutation. Metadata-only compatible updates do not establish a safe changed-QML
+  migration, and the helper does not restart Quickshell.
+- Cross-process rollback is manual using inspected retained private backups; no
+  automatic cross-process `rollback` CLI exists. Do not replay stale wallpaper state.
+- Keep the extracted bundle helper for status/update/uninstall. It is not silently
+  self-updated; download and verify a newer bundle for new helper code.
+- Complete stable version/build/downloaded-artifact validation before publication;
+  development-snapshot evidence is not stable-artifact acceptance.
+- Require explicit later approval separately for each commit, push/CI run, merge,
+  tag, draft, public release and marketplace update. Production changes are not
+  authorized. Marketplace updates also need maintainer verification of the exact
+  intended snapshot; a GitHub Release does not confer that verification.
+- Branch pushes build CI artifacts only. Manual `publish=true` dispatch is a
+  write-capable draft path, not public publication. Per the prior review, no
+  protected environment was configured; the YAML declaration alone is not an
+  approval gate. Configure and verify protections before using that path. See
+  [release gates](RELEASES.md#workflow-provenance-and-release-review).
+
+## Historical original-submission record
+
+The checklist, pending status and template below describe the original submission,
+not current listing status or newly completed stable 0.2.0 validation. They are
+retained as history; do not treat their checked boxes as current release approval.
+
+### Historical publication gates
 
 - [x] Independent review of hardening and save-order fixes found no blockers.
 - [x] Offline Rust, Python, manifest/QML lint and runtime tests passed; optional
@@ -64,7 +107,7 @@ Do not remove or disguise those capabilities to obtain a passing scan.
 A preview image is optional. Add only an actual screenshot with permission to
 publish it; do not fabricate screenshots or copy another plugin's artwork.
 
-## Submission status
+### Historical submission status
 
 The owner approved the complete issue text and confirmed all five required
 checklist statements. Submitted request:
@@ -77,7 +120,7 @@ maintainer approval**, not an approved listing or tagged stable release.
 No preview asset was submitted. Manual engine setup and the unverified isolated
 systemd coordinator rehearsal are disclosed in the issue.
 
-## Submission template
+### Historical submission template
 
 Title: `[Plugin]: SwiftWall`
 
@@ -120,7 +163,7 @@ capabilities. Exact validation evidence and current limitations are recorded in
 - [ ] The plugin does not overwrite user configuration without explicit consent.
 - [ ] I understand that approval is for listing and is not a security review.
 
-## After submission
+## Ongoing marketplace verification
 
 Keep one submission issue. Address validation feedback there rather than opening
 repeated submissions. Approval is bound to the exact validated commit and requires

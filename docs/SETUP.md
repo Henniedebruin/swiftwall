@@ -1,9 +1,14 @@
 # Simple local installation and maintenance
 
-This branch prepares prebuilt distribution. **No release has been published by this
-work.** The commands below become available from an approved release bundle; they
-are not a claim that a release download exists today. Source installation remains
-available in [ADVANCED_INSTALL.md](ADVANCED_INSTALL.md).
+This branch prepares stable 0.2.0 prebuilt distribution. Local implementation and
+local validation are complete; see the [validation record](STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
+This is not new stable musl artifact acceptance. A native GNU release binary has been
+built and reports `swiftwall 0.2.0`, but **no stable musl release archive or checksum
+has been built or published.** The quick-install commands below are planned for an
+approved, published stable bundle, not evidence of a download available today.
+The prebuilt installation requires no Rust compiler, Cargo or repository clone.
+Source installation remains an advanced alternative in
+[ADVANCED_INSTALL.md](ADVANCED_INSTALL.md).
 
 ## Before starting
 
@@ -18,9 +23,10 @@ immediately inside each folder. Subfolders are not included automatically. Netwo
 GVFS and FUSE folders are rejected for new collections. Existing settings are not
 replaced during an update.
 
-## Get and verify a release
+## Planned stable 0.2.0 quick install
 
-Once a release is approved, download its Linux x86_64 archive and `SHA256SUMS` from
+Only after stable 0.2.0 is approved and published, download
+`swiftwall-0.2.0-linux-x86_64.tar.gz` and `SHA256SUMS` from
 [SwiftWall Releases](https://github.com/Henniedebruin/swiftwall/releases). Verify the
 archive before extracting or executing its setup helper:
 
@@ -87,7 +93,9 @@ Select an exact approved release version, not a moving `latest` URL:
 ./swiftwall-setup update --version X.Y.Z
 ```
 
-Replace `X.Y.Z` with a real published release. The helper downloads only the fixed
+Replace `X.Y.Z` with a real published release. For a supported older owned install,
+`--version 0.2.0` is the planned stable target only after publication; it is not
+available yet. The helper downloads only the fixed
 SwiftWall GitHub release asset and SHA256SUMS over HTTPS, bounds downloads and
 extraction, verifies every file and checks the binary's exact version. An optional
 `--sha256 DIGEST` pins an independently obtained archive checksum for remote downloads.
@@ -180,6 +188,8 @@ See [PLUGIN_INSTALL.md](../packaging/PLUGIN_INSTALL.md) for these limitations.
 ## Marketplace and security
 
 SwiftWall's verified marketplace snapshot is still correctly `manual-setup`.
+That verification does not automatically cover the locally prepared stable 0.2.0
+snapshot; a marketplace update requires separate approval and maintainer verification.
 Omarchy's plugin installer does not provision the companion Rust daemon. A release
 bundle/helper simplifies the separate step but does not remove the requirement.
 Do not let both Omarchy's Git-based plugin manager and SwiftWall's ownership-based

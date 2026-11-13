@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.henniedebruin.swiftwall",
   "name": "SwiftWall",
-  "version": "0.2.0-dev",
+  "version": "0.2.0",
   "author": "Henniedebruin",
   "license": "MIT",
   "description": "Wallpaper carousel for Omarchy and Hyprland. Rotates images from your chosen folders on a timer, with pause/resume and next/previous controls in the bar, plus shuffle or sequential order. Runs locally.",

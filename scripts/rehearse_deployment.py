@@ -623,7 +623,7 @@ if args[1] == "enable" and state["case"] == "activation-timeout-complete":
         if self.case != "success-disabled":
             self.ctl("enable", self.unit, "--runtime")
         self.deployment = Deployment(
-            home=self.home, unit=self.unit, env=self.env, v01_hash=V01,
+            target_version="0.2.0-dev", home=self.home, unit=self.unit, env=self.env, v01_hash=V01,
             v02=self.args.v02, v02_hash=V02, plugin_source=self.args.plugin_source,
             backup_root=self.root / "backups", evidence=self.evidence / "coordinator",
             activate=lambda: self.activation(True), deactivate=lambda: self.activation(False),
@@ -665,7 +665,7 @@ if args[1] == "enable" and state["case"] == "activation-timeout-complete":
         reply = json.loads(self.command([self.binary, "request", json.dumps(request)]))
         require(reply.get("ok"), f"real settings save failed: {reply}")
         self.record("sequential_settings_saved", request=request, reply=reply)
-        self.deployment.healthy("0.2.0-dev", 1)
+        self.deployment.healthy(self.deployment.target_version, 1)
         saved = json.loads(self.command([self.binary, "settings"]))
         require(saved["settings"]["selection"] == "sequential", "settings not committed")
         require('selection = "sequential"' in self.deployment.config.read_text(), "config not persisted")

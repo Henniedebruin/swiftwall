@@ -85,7 +85,7 @@ class HarnessSafetyTests(unittest.TestCase):
         trace.chmod(0o666)
         fixture.evidence.chmod(0o777)
         deployment = coordinator.Deployment(
-            home=fixture.home, unit=fixture.unit, env=fixture.env, v01_hash="unused",
+            target_version="0.2.0-dev", home=fixture.home, unit=fixture.unit, env=fixture.env, v01_hash="unused",
             v02=fixture.args.v02, v02_hash=coordinator.digest(fixture.args.v02),
             plugin_source=self.root, backup_root=self.root / "backups",
             evidence=self.root / "coordinator", activate=Mock(), deactivate=Mock(), runner=fixture.runner)
@@ -738,7 +738,7 @@ class CoordinatorEvidenceTests(unittest.TestCase):
         artifact = self.root / "v02"
         artifact.write_bytes(b"never executed")
         self.runner = Mock()
-        self.options = dict(home=home, unit="private-fixture.service",
+        self.options = dict(target_version="0.2.0-dev", home=home, unit="private-fixture.service",
                             env=rehearsal.engine_environment(self.root), v01_hash="unused",
                             v02=artifact, v02_hash=coordinator.digest(artifact),
                             plugin_source=self.root, backup_root=self.root / "backup",
@@ -748,6 +748,32 @@ class CoordinatorEvidenceTests(unittest.TestCase):
         self.popen = guard.start()
         self.addCleanup(guard.stop)
         self.addCleanup(self.popen.assert_not_called)
+
+    def test_constructor_accepts_stable_target_without_commands(self):
+        deployment = coordinator.Deployment(**{**self.options, "target_version": "0.2.0"})
+        self.assertEqual(deployment.target_version, "0.2.0")
+        self.runner.assert_not_called()
+
+    def test_constructor_requires_explicit_target_version(self):
+        options = {key: value for key, value in self.options.items() if key != "target_version"}
+        with self.assertRaisesRegex(TypeError, "target_version"):
+            coordinator.Deployment(**options)
+        self.assertFalse(self.options["evidence"].exists())
+        self.runner.assert_not_called()
+
+    def test_invalid_target_version_is_rejected_before_io(self):
+        for version in (None, 2, "", "0.2", "v0.2.0", "0.02.0", "../0.2.0", "0.2.0\n"):
+            with self.subTest(version=version), \
+                    patch.object(coordinator.Path, "resolve", side_effect=AssertionError("Path I/O forbidden")) as resolve, \
+                    patch.object(coordinator, "private_evidence_directory") as evidence, \
+                    patch.object(coordinator, "OmarchyActivation") as activation:
+                with self.assertRaisesRegex(ValueError, "safe major.minor.patch"):
+                    coordinator.Deployment(**{**self.options, "target_version": version})
+                resolve.assert_not_called()
+                evidence.assert_not_called()
+                activation.assert_not_called()
+        self.assertFalse(self.options["evidence"].exists())
+        self.runner.assert_not_called()
 
     def response(self, **changes):
         values = {key: self.options["env"][key] for key in coordinator.ENGINE_ENVIRONMENT}
@@ -946,7 +972,7 @@ class CoordinatorRegressionTests(unittest.TestCase):
         self.runner = Mock(side_effect=AssertionError("regression must not execute any command"))
         self.addCleanup(self.runner.assert_not_called)
         self.d = coordinator.Deployment(
-            home=self.home, unit="swiftwall-rehearse-test.service", env=env,
+            target_version="0.2.0-dev", home=self.home, unit="swiftwall-rehearse-test.service", env=env,
             v01_hash=coordinator.digest(self.v01), v02=self.v02, v02_hash=coordinator.digest(self.v02),
             plugin_source=self.root, backup_root=self.root / "backups", evidence=self.root / "evidence",
             activate=Mock(), deactivate=Mock(), runner=self.runner)
@@ -954,6 +980,77 @@ class CoordinatorRegressionTests(unittest.TestCase):
         self.d.service.state.return_value = {
             "UnitFileState": "enabled-runtime", "ActiveState": "inactive", "MainPID": "0", "NRestarts": "0"}
         self.d.healthy = Mock(return_value={"ok": True, "status": {"observed_wallpaper": str(self.wallpaper)}})
+
+    def upgrade_target_fixture(self, target_version, *, daemon_version=None, binary_version=None):
+        """Use real readiness/version checks and file-only installation, never a service."""
+        self.d.target_version = target_version
+        self.d.activate.return_value = None
+        reply = {"ok": True, "protocol_version": 1,
+                 "daemon_version": daemon_version or target_version,
+                 "status": {"observed_wallpaper": str(self.wallpaper)}}
+        self.d.service.state.return_value.update(ActiveState="active", MainPID="123")
+
+        def command(args, **kwargs):
+            if args[1] == "request":
+                return subprocess.CompletedProcess(args, 0, json.dumps(reply), "")
+            self.assertEqual(args[1:], ["--version"])
+            return subprocess.CompletedProcess(args, 0, f"swiftwall {binary_version or target_version}\n", "")
+
+        def healthy(version, protocol=None):
+            if version == "0.1.0":
+                return {"ok": True, "status": {"observed_wallpaper": str(self.wallpaper)}}
+            return coordinator.Deployment.healthy(self.d, version, protocol)
+
+        def installer(*args):
+            if "--rollback" in args:
+                return coordinator.install_support.rollback(self.home, dry_run="--dry-run" in args)
+            return coordinator.install_support.install(self.home, self.v02, dry_run="--dry-run" in args)
+
+        self.d.healthy.side_effect = healthy
+        self.d.service.wait_ready.side_effect = lambda *args, **kwargs: coordinator.UserService.wait_ready(
+            readiness, *args, **kwargs)
+        readiness = coordinator.UserService("private-fixture.service", runner=self.runner)
+        readiness.state = self.d.service.state
+        readiness.command = Mock(side_effect=command)
+        with patch.object(subprocess, "Popen", side_effect=AssertionError("Live process forbidden")), \
+                patch.object(self.d, "installer", side_effect=installer), \
+                patch.object(self.d, "plugin"), patch.object(self.d, "command", return_value="{}"), \
+                patch.object(self.d, "running_environment") as environment, \
+                patch.object(self.d, "socket_owner") as socket_owner, \
+                patch.object(self.d, "running_executable") as executable:
+            result = self.d.upgrade()
+        self.d.healthy.assert_any_call(target_version, 1)
+        self.d.service.wait_ready.assert_called_once_with(
+            self.d.binary, version=target_version, protocol=1, timeout=self.d.timeout)
+        environment.assert_called_once()
+        socket_owner.assert_called_once()
+        executable.assert_called_once()
+        self.assertEqual(self.d.binary.read_bytes(), self.v02.read_bytes())
+        return result
+
+    def test_stable_target_upgrade_succeeds(self):
+        self.assertEqual(self.upgrade_target_fixture("0.2.0")["daemon_version"], "0.2.0")
+        self.d.activate.assert_called_once()
+
+    def test_legacy_dev_target_upgrade_still_succeeds(self):
+        self.assertEqual(self.upgrade_target_fixture("0.2.0-dev")["daemon_version"], "0.2.0-dev")
+        self.d.activate.assert_called_once()
+
+    def test_stable_target_rejects_dev_daemon_and_rolls_back(self):
+        with self.assertRaises(rehearsal.ServiceError) as raised:
+            self.upgrade_target_fixture("0.2.0", daemon_version="0.2.0-dev")
+        self.assertEqual(raised.exception.category, "protocol-incompatible")
+        self.d.healthy.assert_any_call("0.2.0", 1)
+        self.assertEqual(self.d.binary.read_bytes(), self.v01.read_bytes())
+        self.d.activate.assert_not_called()
+
+    def test_stable_target_rejects_dev_binary_and_rolls_back(self):
+        with self.assertRaises(rehearsal.ServiceError) as raised:
+            self.upgrade_target_fixture("0.2.0", binary_version="0.2.0-dev")
+        self.assertEqual(raised.exception.category, "version-incompatible")
+        self.d.healthy.assert_any_call("0.2.0", 1)
+        self.assertEqual(self.d.binary.read_bytes(), self.v01.read_bytes())
+        self.d.activate.assert_not_called()
 
     def copy_fault(self, fault):
         real_copy = coordinator.shutil.copy2
@@ -1273,7 +1370,7 @@ class CoordinatorRegressionTests(unittest.TestCase):
         self.assertIn("rollback_passed", [event["event"] for event in events])
 
     def test_isolated_constructor_rejects_default_or_unpaired_callbacks_without_commands(self):
-        options = dict(home=self.home, unit="swiftwall-rehearse-test.service", env=self.d.env,
+        options = dict(target_version="0.2.0-dev", home=self.home, unit="swiftwall-rehearse-test.service", env=self.d.env,
                        v01_hash=self.d.v01_hash, v02=self.v02, v02_hash=self.d.v02_hash,
                        plugin_source=self.root, backup_root=self.root / "backups",
                        evidence=self.root / "constructor-evidence", runner=self.runner)
@@ -1288,7 +1385,7 @@ class CoordinatorRegressionTests(unittest.TestCase):
         popen.assert_not_called()
 
     def test_real_home_constructor_rejects_unreconciled_callbacks_and_defaults_safely(self):
-        options = dict(home=self.home, unit="swiftwall-rehearse-test.service", env=self.d.env,
+        options = dict(target_version="0.2.0-dev", home=self.home, unit="swiftwall-rehearse-test.service", env=self.d.env,
                        v01_hash=self.d.v01_hash, v02=self.v02, v02_hash=self.d.v02_hash,
                        plugin_source=self.root, backup_root=self.root / "backups",
                        evidence=self.root / "constructor-evidence", runner=self.runner)
@@ -1319,7 +1416,7 @@ class CoordinatorRegressionTests(unittest.TestCase):
         controller = Mock()
         with patch.object(subprocess, "Popen") as popen:
             deployment = coordinator.Deployment(
-                home=self.home, unit="swiftwall-rehearse-test.service", env=self.d.env,
+                target_version="0.2.0-dev", home=self.home, unit="swiftwall-rehearse-test.service", env=self.d.env,
                 v01_hash=self.d.v01_hash, v02=self.v02, v02_hash=self.d.v02_hash,
                 plugin_source=self.root, backup_root=self.root / "backups",
                 evidence=self.root / "constructor-evidence", runner=self.runner,

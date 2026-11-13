@@ -1,9 +1,21 @@
-# Linux release bundles (draft infrastructure)
+# Linux release bundles (local stable 0.2.0 preparation)
 
-This describes the release packaging contract, not an available public release.
-No public artifact is asserted to exist. The workflow creates **drafts only**,
-and only after an explicit manual request and configured environment approval.
-Adding this infrastructure does not upload, publish, install, or activate anything.
+This describes the release packaging contract, not an available stable release.
+Local implementation and local validation are complete; see the
+[validation record](STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
+This is not new stable musl artifact acceptance. The native
+GNU release binary has been built and reports `swiftwall 0.2.0`; **no stable musl
+release archive or checksum has been built or published.** The planned assets are
+`swiftwall-0.2.0-linux-x86_64.tar.gz` and `SHA256SUMS`; see the
+[planned quick install](SETUP.md#planned-stable-020-quick-install).
+Prebuilt installation requires no Rust compiler, Cargo or repository clone.
+
+The workflow can create **drafts only**, on an explicit `publish=true` manual
+request. It declares a `release-draft` environment, but the prior repository review
+found no configured GitHub environments or approval protection. The declaration
+alone does not enforce approval. Do not use the write-capable dispatch path until
+protections are configured and verified and separate approval is granted.
+Local preparation does not upload, publish, install, or activate anything.
 
 ## Assets and compatibility
 
@@ -108,6 +120,8 @@ before that artifact is described as tested.
 }
 ```
 
+This is an abbreviated development/schema example, not stable release metadata;
+stable metadata must say `0.2.0` and be generated from the approved stable build.
 The abbreviated example omits the other payload entries. `files` is a mapping
 from bundle-root-relative paths to **exactly** `{sha256, mode}` records for every
 payload file **except release.json itself** (self-hashing is impossible).
@@ -137,6 +151,8 @@ before executing its helper, and extract into your own non-shared directory.
 
 ## Local packaging and tests
 
+The following is a development-build example, not a command to build stable assets
+as part of documentation preparation. Run only under separate build approval.
 From the repository root, after the setup launcher and its support files exist:
 
 ```sh
@@ -207,12 +223,36 @@ GitHub environment with **required reviewers** and appropriate tag restrictions.
 An environment declaration alone does not create approval protection. Leave
 publishing disabled until those protections are verified. Dispatch from the
 existing `vVERSION` tag with `publish=true`; the read-only build job checks the
-ref/version, and the separate environment-gated job gets `contents: write`.
+ref/version, and the separate job declaring that environment gets `contents: write`.
+It is approval-gated only if repository administrators have actually configured
+and verified the environment protections; the prior review found none configured.
 That job downloads only this run's artifact, rechecks SHA256SUMS, and invokes
 `gh release create --verify-tag --draft`. Existing releases are not edited and
 assets are not overwritten. Public publication requires a separate deliberate
 human action outside this workflow. No release or production actions are part
 of local implementation/testing.
+
+Explicit later approval is required separately for each commit, push/CI run, merge,
+tag creation, draft creation, public release and marketplace update. Documentation
+or local implementation approval grants none of these, nor permission to change
+production. A `publish=true` dispatch rebuilds the bundle; those new bytes need
+independent acceptance even if an earlier build passed. Never relabel development
+assets as stable or overwrite conflicting tags/assets.
+
+## Installation and recovery boundaries
+
+- The marketplace's **Manual setup** label remains legitimate: plugin installation
+  does not provision the mandatory companion daemon and user service.
+- Marketplace-owned/Git-managed plugin files are not adopted by the setup helper;
+  do not manage the same plugin directory through both installers.
+- Changed QML/helper payloads or structural plugin updates are blocked before
+  mutation. Identical payloads and compatible version/descriptive metadata-only
+  updates are supported; there is no automatic shell restart or universal updater.
+- Ordinary failures attempt operation-scoped recovery. Cross-process rollback is
+  manual using inspected private backups, not an automatic `rollback` CLI. Never
+  restore a stale wallpaper snapshot over the active selection.
+- Retain the extracted bundle helper for maintenance. It is not silently
+  self-updated; obtain and verify a newer bundle for new helper code/contracts.
 
 `release.json` records the declared source commit, version, target and exact
 payload hashes/modes. The workflow/run logs additionally record the build context
