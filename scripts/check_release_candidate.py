@@ -241,17 +241,141 @@ def wait_status(process, path, version, predicate):
     raise SmokeError('Daemon status condition exceeded bounded deadline')
 
 
-def daemon_smoke(binary, root, cwd, env, version):
+def validate_state(state, images):
+    """Validate the exact durable outcome of one successful sequential apply."""
+    require(type(state) is dict, 'Invalid durable state object')
+    require(type(state.get('version')) is int and state['version'] == 1
+            and state.get('paused') is True
+            and 'protective_suspension' in state and state['protective_suspension'] is None
+            and state.get('observed') == str(images[1])
+            and 'requested' in state and state['requested'] is None
+            and type(state.get('last_result')) is dict
+            and state['last_result'].get('success') is True,
+            'Unexpected durable apply/pause state')
+    carousel = state.get('carousel')
+    require(type(carousel) is dict, 'Invalid durable carousel')
+    paths, bag, history = (carousel.get(key) for key in ('paths', 'bag', 'history'))
+    expected = sorted(str(image) for image in images)
+    require(type(paths) is list and paths == expected, 'Invalid durable carousel paths')
+    require(type(bag) is list and all(type(p) is str for p in bag)
+            and len(bag) == len(set(bag)) and set(bag) <= set(expected)
+            and bag == [str(images[0])], 'Invalid durable carousel bag')
+    require(type(history) is list and history == [str(images[1])]
+            and type(carousel.get('cursor')) is int and carousel['cursor'] == 0
+            and history[carousel['cursor']] == state['observed'],
+            'Invalid durable carousel history/cursor')
+    return state
+
+
+def paused_settled(status):
+    return (type(status) is dict and status.get('paused') is True
+            and status.get('applying') is False and status.get('scanning') is False
+            and status.get('persistence_pending') is False
+            and type(status.get('eligible_images')) is int and status['eligible_images'] == 2)
+
+
+def validate_paused_status(status, images):
+    require(paused_settled(status) and status.get('state') == 'paused'
+            and 'next_change_in_seconds' in status and status['next_change_in_seconds'] is None
+            and status.get('observed_wallpaper') == str(images[1])
+            and 'requested_wallpaper' in status and status['requested_wallpaper'] is None
+            and all(key in status and status[key] is None for key in
+                    ('last_persistence_error', 'error', 'protective_suspension')),
+            'Unexpected settled paused status')
+
+
+def redact_evidence(value, aliases):
+    """Typed allowlist: never preserve arbitrary strings, keys, messages or paths."""
+    if type(value) is not dict:
+        return {'invalid_type': type(value).__name__}
+    result = {}
+    for key in ('version', 'cursor', 'eligible_images'):
+        if key in value:
+            result[key] = value[key] if type(value[key]) is int else {'invalid_type': type(value[key]).__name__}
+    for key in ('paused', 'applying', 'scanning', 'persistence_pending', 'success'):
+        if key in value:
+            result[key] = value[key] if type(value[key]) is bool else {'invalid_type': type(value[key]).__name__}
+    for key in ('observed', 'requested', 'observed_wallpaper', 'requested_wallpaper'):
+        if key in value:
+            item = value[key]
+            result[key] = None if item is None else aliases.get(item, 'unknown-path') if type(item) is str else {'invalid_type': type(item).__name__}
+    for key in ('paths', 'bag', 'history'):
+        if key in value:
+            items = value[key]
+            result[key] = ([aliases.get(item, 'unknown-path') if type(item) is str else
+                            {'invalid_type': type(item).__name__} for item in items[:32]]
+                           if type(items) is list else {'invalid_type': type(items).__name__})
+    for key in ('carousel', 'last_result', 'last_application_result'):
+        if key in value:
+            result[key] = None if value[key] is None else redact_evidence(value[key], aliases)
+    for key in ('error', 'last_persistence_error', 'protective_suspension', 'config_worker_error',
+                'next_change_in_seconds'):
+        if key in value:
+            result[key + '_present'] = value[key] is not None
+    return result
+
+
+def file_evidence(path, aliases, parse=False):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_nlink != 1):
+                return {'unavailable': True}
+            raw = stream.read(MAX_OUTPUT + 1)
+        result = {'size': info.st_size, 'sha256': hashlib.sha256(raw).hexdigest(),
+                  'hash_scope': 'prefix' if len(raw) > MAX_OUTPUT else 'complete'}
+        if parse and len(raw) <= MAX_OUTPUT:
+            try:
+                result['state'] = redact_evidence(unique_json(raw), aliases)
+            except ValueError:
+                result['invalid_json'] = True
+                result['type'] = 'bytes'
+        return result
+    except OSError:
+        return {'unavailable': True}
+
+
+def daemon_smoke(binary, root, cwd, env, version, evidence=None):
     env, config, link, calls, images = daemon_fixture(root, env)
     original = config.read_bytes()
     initial_link = os.readlink(link)
     initial_inode = link.lstat().st_ino
     control = Path(env['SWIFTWALL_RUNTIME_DIR']) / 'control.sock'
+    state_path = Path(env['SWIFTWALL_STATE_DIR']) / 'state.json'
+    aliases = {str(image): 'fixture-' + str(index + 1) for index, image in enumerate(images)}
+    evidence = evidence if evidence is not None else {}
+
+    def capture(phase):
+        evidence[phase + '_state'] = file_evidence(state_path, aliases, parse=True)
+
+    def wait(process, predicate):
+        def observe(status):
+            evidence['status'] = redact_evidence(status, aliases)
+            return predicate(status)
+        return wait_status(process, control, version, observe)
+
+    def read_state():
+        require(state_path.stat().st_size <= MAX_OUTPUT, 'Oversized flushed state')
+        require(stat.S_IMODE(state_path.stat().st_mode) == 0o600, 'State is not private')
+        return validate_state(unique_json(state_path.read_bytes()), images)
+
+    def shutdown(process):
+        require(config.read_bytes() == original, 'Daemon changed configuration')
+        os.killpg(process.pid, signal.SIGTERM)
+        await_exit(process)
+
+    def revalidate_shutdown(process):
+        require(process.returncode == 0, 'Daemon did not exit cleanly on SIGTERM')
+        require(config.read_bytes() == original and not control.exists(), 'Unclean daemon shutdown')
+        return read_state()
+
+    evidence['stage'] = 'initial-startup-and-controls'
     with tempfile.TemporaryFile() as output:
         process = start([binary, 'daemon'], cwd, env, output)
         try:
-            status = wait_status(process, control, version,
-                                 lambda s: s['eligible_images'] == 2 and not s['scanning'])
+            status = wait(process, lambda s: s['eligible_images'] == 2 and s['scanning'] is False)
             require(status['state'] == 'running' and not status['applying'], 'Unexpected startup state')
             require(os.readlink(link) == initial_link and link.lstat().st_ino == initial_inode
                     and not calls.exists(), 'Startup changed the private background')
@@ -262,8 +386,7 @@ def daemon_smoke(binary, root, cwd, env, version):
             require(request(control, 'pause', version)['status']['paused'] is True, 'Pause failed')
             require(request(control, 'resume', version)['status']['paused'] is False, 'Resume failed')
             request(control, 'next', version)
-            status = wait_status(process, control, version,
-                                 lambda s: not s['applying'] and s['last_application_result'] is not None)
+            status = wait(process, lambda s: s['applying'] is False and s['last_application_result'] is not None)
             require(status['last_application_result']['success'] is True
                     and status['error'] is None and status['protective_suspension'] is None,
                     'Fake setter application failed')
@@ -273,28 +396,57 @@ def daemon_smoke(binary, root, cwd, env, version):
                     and status['observed_wallpaper'] == str(images[1]), 'Unexpected setter invocation/link')
             # Leave an unmistakable final state for the SIGTERM durability assertion.
             request(control, 'pause', version)
-            require(config.read_bytes() == original, 'Daemon changed configuration')
-            os.killpg(process.pid, signal.SIGTERM)
-            await_exit(process)
+            evidence['stage'] = 'initial-persistence-settle'
+            validate_paused_status(wait(process, paused_settled), images)
+            evidence['stage'] = 'initial-sigterm'
+            shutdown(process)
         finally:
-            stop_reap(process)
-        require(process.returncode == 0, 'Daemon did not exit cleanly on SIGTERM')
+            try:
+                stop_reap(process)
+            finally:
+                capture('sigterm')
+                output.seek(0)
+                raw = output.read(MAX_OUTPUT + 1)
+                evidence['first_diagnostics'] = {'size': output.seek(0, 2),
+                    'sha256': hashlib.sha256(raw).hexdigest(), 'hash_scope': 'bounded-prefix'}
+        evidence['stage'] = 'initial-durable-state-validation'
+        state = revalidate_shutdown(process)
         require(output.tell() <= MAX_OUTPUT, 'Daemon diagnostics exceeded limit')
-    state_path = Path(env['SWIFTWALL_STATE_DIR']) / 'state.json'
-    require(state_path.stat().st_size <= MAX_OUTPUT, 'Oversized flushed state')
-    state = unique_json(state_path.read_bytes())
-    require(state['version'] == 1 and state['paused'] is True
-            and state['observed'] == str(images[1]) and state['requested'] == str(images[1])
-            and state['last_result']['success'] is True, 'SIGTERM did not flush expected state')
-    require(stat.S_IMODE(state_path.stat().st_mode) == 0o600, 'State is not private')
-    require(config.read_bytes() == original and not control.exists(), 'Unclean daemon shutdown')
-    return {'environment': env, 'startup_link_unchanged': True, 'protocol': 1,
+
+    before = (os.readlink(link), link.lstat().st_ino, calls.read_bytes(), config.read_bytes())
+    evidence['stage'] = 'restart-recovery'
+    with tempfile.TemporaryFile() as output:
+        # Same extracted executable, cwd, environment and durable fixture paths.
+        process = start([binary, 'daemon'], cwd, env, output)
+        try:
+            validate_paused_status(wait(process, paused_settled), images)
+            recovered = read_state()
+            require(recovered == state, 'Restart changed recovered durable state')
+            require((os.readlink(link), link.lstat().st_ino, calls.read_bytes(), config.read_bytes())
+                    == before, 'Restart changed private background/setter/config')
+            shutdown(process)
+        finally:
+            try:
+                stop_reap(process)
+            finally:
+                capture('restart')
+                output.seek(0)
+                raw = output.read(MAX_OUTPUT + 1)
+                evidence['restart_diagnostics'] = {'size': output.seek(0, 2),
+                    'sha256': hashlib.sha256(raw).hexdigest(), 'hash_scope': 'bounded-prefix'}
+        require(revalidate_shutdown(process) == state, 'Restart shutdown changed durable state')
+        require((os.readlink(link), link.lstat().st_ino, calls.read_bytes(), config.read_bytes())
+                == before, 'Restart shutdown changed private fixtures')
+        require(output.tell() <= MAX_OUTPUT, 'Daemon diagnostics exceeded limit')
+    evidence['stage'] = 'restart-and-shutdown-verified'
+    return {'startup_link_unchanged': True, 'protocol': 1,
+            'restart_recovered': True, 'restart_background_unchanged': True,
             'pause_resume': True, 'fake_setter_success': True, 'config_intact': True,
             'sigterm_state_flushed': True, 'exit_code': process.returncode}
 
 
-def check_candidate(archive, checksums, version, source_commit):
-    """Return schema-1 success report; raise on any failed check. No persistent writes."""
+def check_candidate(archive, checksums, version, source_commit, evidence=None):
+    """Return schema-1 success report; collect redacted evidence before cleanup."""
     validate_version(version)
     require(re.fullmatch('[a-f0-9]{40}', source_commit) is not None,
             'source_commit must be exactly 40 lowercase hex characters')
@@ -325,7 +477,7 @@ def check_candidate(archive, checksums, version, source_commit):
                 and dry.get('downloads') is False and dry.get('changes') is False,
                 'Launcher did not return a safe dry-run plan')
         require(user_tree(env) == initial_user_tree, 'Launcher dry-run wrote private user data')
-        daemon = daemon_smoke(binary, root, cwd, env, version)
+        daemon = daemon_smoke(binary, root, cwd, env, version, evidence=evidence)
         verify_directory(bundle, version)  # No modified helpers or bytecode left behind.
         return {'schema': 1, 'ok': True, 'scope': 'archive/binary/launcher',
                 'limitation': LIMITATION, 'version': version, 'source_commit': source_commit,
@@ -335,7 +487,7 @@ def check_candidate(archive, checksums, version, source_commit):
                            'daemon': daemon}, 'temporary_paths_removed': True}
 
 
-def main(argv=None):
+def main(argv=None, evidence=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--archive', type=Path, required=True)
     parser.add_argument('--checksums', type=Path, required=True)
@@ -343,11 +495,16 @@ def main(argv=None):
     parser.add_argument('--source-commit', required=True)
     parser.add_argument('--report', type=Path)
     args = parser.parse_args(argv)
+    evidence = evidence if evidence is not None else {}
     try:
-        report = check_candidate(args.archive, args.checksums, args.version, args.source_commit)
+        report = check_candidate(args.archive, args.checksums, args.version, args.source_commit,
+                                 evidence=evidence)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         report = {'schema': 1, 'ok': False, 'scope': 'archive/binary/launcher',
-                  'limitation': LIMITATION, 'error': str(exc)}
+                  'limitation': LIMITATION, 'error': 'Release candidate check failed',
+                  'error_type': type(exc).__name__}
+    if evidence:
+        report['evidence'] = evidence
     text = json.dumps(report, sort_keys=True, indent=2) + '\n'
     if args.report:
         try:

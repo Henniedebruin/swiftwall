@@ -4,6 +4,7 @@ Only helper-process and fake-setter tests execute Python; no fixture is substitu
 for the release smoke binary and no successful artifact acceptance is claimed.
 """
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -18,6 +19,7 @@ import threading
 import unittest
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import check_release_candidate as smoke
@@ -290,6 +292,42 @@ class CandidateTests(unittest.TestCase):
         self.assert_no_execution()
         self.assertFalse((self.root / 'outside').exists())
 
+    def test_evidence_forwarded_before_cleanup_and_never_added_to_artifact(self):
+        evidence = {}
+        roots = []
+        def daemon(binary, root, cwd, env, version, evidence=None):
+            roots.append(root)
+            evidence['sigterm_state'] = {'state': {'requested': None, 'paused': True}}
+            raise smoke.SmokeError('generated isolated failure')
+        before = self.archive.read_bytes()
+        outputs = ['swiftwall ' + VERSION, 'SwiftWall Setup --dry-run',
+                   json.dumps({'operation': 'install', 'dry_run': True,
+                               'downloads': False, 'changes': False})]
+        with patch.object(smoke, 'run', side_effect=outputs), \
+                patch.object(smoke, 'daemon_smoke', side_effect=daemon):
+            with self.assertRaises(smoke.SmokeError):
+                smoke.check_candidate(self.archive, self.sums, VERSION, COMMIT, evidence)
+        self.assertFalse(roots[0].exists())
+        self.assertIsNone(evidence['sigterm_state']['state']['requested'])
+        self.assertEqual(self.archive.read_bytes(), before)
+        with tarfile.open(self.archive) as archive:
+            payload = {name.split('/', 1)[1] for name in archive.getnames()}
+            self.assertEqual(payload, set(bundle.PAYLOAD_FILES) | {'release.json'})
+
+    def test_main_embeds_only_collected_evidence_not_exception_strings(self):
+        report = self.root / 'release-smoke.json'
+        def fail(*args, evidence=None):
+            evidence['status'] = {'last_persistence_error_present': True}
+            raise smoke.SmokeError('/home/foreign-user/secret error')
+        argv = ['--archive', str(self.archive), '--checksums', str(self.sums),
+                '--version', VERSION, '--source-commit', COMMIT, '--report', str(report)]
+        with patch.object(smoke, 'check_candidate', side_effect=fail), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(smoke.main(argv), 1)
+        value = json.loads(report.read_text())
+        self.assertTrue(value['evidence']['status']['last_persistence_error_present'])
+        self.assertNotIn('foreign-user', report.read_text())
+
     def test_failure_report_and_existing_report_preserved(self):
         report = self.root / 'report.json'
         argv = ['--archive', str(self.archive), '--checksums', str(self.sums),
@@ -303,6 +341,206 @@ class CandidateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(smoke.main(argv), 1)
         self.assertEqual(report.read_bytes(), original)
+
+
+class DurableStateTests(unittest.TestCase):
+    """Generated JSON/process mocks only; NOT musl artifact execution."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='rc-state-', dir='/tmp')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.images = [self.root / 'one.png', self.root / 'two.png']
+        first, second = map(str, self.images)
+        self.state = {'version': 1, 'paused': True, 'protective_suspension': None,
+                      'observed': second, 'requested': None,
+                      'last_result': {'success': True, 'message': 'fixture only'},
+                      'carousel': {'paths': [first, second], 'bag': [first],
+                                   'history': [second], 'cursor': 0}}
+
+    def test_completed_apply_requested_none_not_last_target(self):
+        self.assertIs(smoke.validate_state(self.state, self.images), self.state)
+        self.state['requested'] = str(self.images[1])
+        with self.assertRaises(smoke.SmokeError):
+            smoke.validate_state(self.state, self.images)
+
+    def test_every_required_field_missing_or_corrupt_rejected(self):
+        for key in self.state:
+            for wrong in ('missing', 'foreign-string', [], False, 9):
+                state = copy.deepcopy(self.state)
+                if wrong == 'missing':
+                    del state[key]
+                else:
+                    state[key] = wrong
+                with self.subTest(key=key, wrong=wrong), self.assertRaises(smoke.SmokeError):
+                    smoke.validate_state(state, self.images)
+        for key in self.state['carousel']:
+            for wrong in ('missing', None, True, -1, {}, [], ['foreign'],
+                          [str(self.images[0])] * 2):
+                state = copy.deepcopy(self.state)
+                if wrong == 'missing':
+                    del state['carousel'][key]
+                else:
+                    state['carousel'][key] = wrong
+                with self.subTest(key=key, wrong=wrong), self.assertRaises(smoke.SmokeError):
+                    smoke.validate_state(state, self.images)
+        for wrong in (None, {}, {'success': 1}, {'success': False}):
+            state = {**self.state, 'last_result': wrong}
+            with self.assertRaises(smoke.SmokeError):
+                smoke.validate_state(state, self.images)
+        for wrong in (True, 1.0):
+            state = {**self.state, 'version': wrong}
+            with self.assertRaises(smoke.SmokeError):
+                smoke.validate_state(state, self.images)
+
+    def test_redactor_never_copies_unknown_strings_or_keys(self):
+        secret = '/home/foreign-user/secret wallpaper ERROR environment'
+        aliases = {str(self.images[0]): 'fixture-1', str(self.images[1]): 'fixture-2'}
+        value = copy.deepcopy(self.state)
+        value.update({secret: secret, 'error': secret, 'last_persistence_error': secret,
+                      'observed': secret, 'paused': secret, 'cursor': secret,
+                      'history': [secret, str(self.images[0]), {secret: secret}],
+                      'requested': {secret: secret}})
+        value['last_result']['message'] = secret
+        text = json.dumps(smoke.redact_evidence(value, aliases))
+        self.assertNotIn(secret, text)
+        self.assertNotIn(str(self.root), text)
+        self.assertIn('fixture-1', text)
+        self.assertIn('error_present', text)
+        self.assertNotIn('message', text)
+
+    def test_invalid_json_evidence_hash_size_type_only(self):
+        path = self.root / 'state.json'
+        raw = b'not json /home/foreign-user/private'
+        path.write_bytes(raw)
+        value = smoke.file_evidence(path, {}, parse=True)
+        self.assertEqual(value['size'], len(raw))
+        self.assertEqual(value['sha256'], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(value['type'], 'bytes')
+        self.assertTrue(value['invalid_json'])
+        self.assertNotIn('foreign-user', json.dumps(value))
+
+    def test_missing_state_and_linked_evidence_are_not_accepted(self):
+        path = self.root / 'missing-state.json'
+        self.assertEqual(smoke.file_evidence(path, {}, parse=True), {'unavailable': True})
+        outside = self.root / 'unrelated-private-file'
+        outside.write_text('/home/foreign-user/never-copy-this')
+        path.symlink_to(outside)
+        self.assertEqual(smoke.file_evidence(path, {}, parse=True), {'unavailable': True})
+        path.unlink()
+        os.link(outside, path)
+        self.assertEqual(smoke.file_evidence(path, {}, parse=True), {'unavailable': True})
+
+    def test_settled_status_requires_explicit_typed_fields(self):
+        status = {'state': 'paused', 'paused': True, 'applying': False, 'scanning': False,
+                  'eligible_images': 2, 'persistence_pending': False,
+                  'last_persistence_error': None, 'error': None, 'protective_suspension': None,
+                  'next_change_in_seconds': None, 'requested_wallpaper': None,
+                  'observed_wallpaper': str(self.images[1])}
+        smoke.validate_paused_status(status, self.images)
+        for key in status:
+            for wrong in ('missing', 'foreign', 1):
+                value = dict(status)
+                if wrong == 'missing':
+                    del value[key]
+                else:
+                    value[key] = wrong
+                with self.subTest(key=key, wrong=wrong), self.assertRaises(smoke.SmokeError):
+                    smoke.validate_paused_status(value, self.images)
+
+    def lifecycle(self, corrupt=None):
+        env = smoke.clean_environment(self.root)
+        status = {'state': 'running', 'paused': False, 'applying': False, 'scanning': False,
+                  'eligible_images': 2, 'persistence_pending': False, 'last_persistence_error': None,
+                  'error': None, 'protective_suspension': None, 'requested_wallpaper': None,
+                  'next_change_in_seconds': None, 'last_application_result': None}
+        starts = []
+        evidence = {}
+        def start(argv, cwd, actual_env, output):
+            output.write(b'/home/foreign-user/private diagnostic message\n')
+            starts.append((argv, cwd, actual_env))
+            if len(starts) == 2 and corrupt:
+                corrupt(status, actual_env)
+            return SimpleNamespace(pid=999999, returncode=0)
+        def request(control, op, version):
+            images = [self.root / 'pictures' / name for name in ('one.png', 'two.png')]
+            if op == 'hello':
+                return {'settings': {'folders': [str(images[0].parent)],
+                                     'interval_seconds': 3600, 'selection': 'sequential'}}
+            if op in ('pause', 'resume'):
+                status['paused'] = op == 'pause'
+                status['state'] = 'paused' if status['paused'] else 'running'
+            if op == 'next':
+                link = self.root / 'background'
+                link.unlink()
+                link.symlink_to(images[1])
+                (self.root / 'setter-calls.jsonl').write_text(json.dumps(
+                    ['theme', 'bg', 'set', str(images[1])]) + '\n')
+                status['observed_wallpaper'] = str(images[1])
+                status['last_application_result'] = {'success': True}
+            if op == 'pause' and status['last_application_result']:
+                state = copy.deepcopy(self.state)
+                state.update(observed=str(images[1]), carousel={
+                    'paths': list(map(str, images)), 'bag': [str(images[0])],
+                    'history': [str(images[1])], 'cursor': 0})
+                directory = self.root / 'daemon-state'
+                directory.mkdir(exist_ok=True)
+                path = directory / 'state.json'
+                path.write_text(json.dumps(state))
+                path.chmod(0o600)
+            return {'status': status}
+        def wait(process, control, version, predicate):
+            self.assertTrue(predicate(status))
+            return status
+        binary = self.root / 'unexecuted-binary'
+        with patch.object(smoke, 'start', side_effect=start), \
+                patch.object(smoke, 'request', side_effect=request), \
+                patch.object(smoke, 'wait_status', side_effect=wait), \
+                patch.object(smoke, 'await_exit'), patch.object(smoke, 'stop_reap'), \
+                patch.object(smoke.os, 'killpg'):
+            try:
+                result = smoke.daemon_smoke(binary, self.root, self.root, env, VERSION, evidence)
+            finally:
+                self.evidence = evidence
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(starts[0], starts[1])
+        self.assertNotIn('environment', result)
+        return result
+
+    def test_restart_same_binary_fixtures_and_recovered_state(self):
+        self.assertTrue(self.lifecycle()['restart_recovered'])
+        self.assertIn('restart_state', self.evidence)
+        self.assertNotIn(str(self.root), json.dumps(self.evidence))
+        self.assertNotIn('foreign-user', json.dumps(self.evidence))
+        self.assertGreater(self.evidence['restart_diagnostics']['size'], 0)
+        self.assertIn('sha256', self.evidence['first_diagnostics'])
+
+    def test_restart_deadline_or_requested_or_persistence_error_rejected(self):
+        # Each subcase needs fresh private fixtures.
+        for field, wrong in (('next_change_in_seconds', 1), ('requested_wallpaper', 'foreign'),
+                             ('last_persistence_error', 'foreign')):
+            with tempfile.TemporaryDirectory(prefix='rc-restart-', dir='/tmp') as temporary:
+                self.root = Path(temporary)
+                with self.subTest(field=field), self.assertRaises(smoke.SmokeError):
+                    self.lifecycle(lambda status, env: status.update({field: wrong}))
+                self.assertIn('restart_state', self.evidence)
+                self.assertNotIn('foreign', json.dumps(self.evidence))
+
+    def test_restart_mutated_state_and_background_rejected(self):
+        def state_changed(status, env):
+            path = Path(env['SWIFTWALL_STATE_DIR']) / 'state.json'
+            value = json.loads(path.read_text())
+            value['carousel']['bag'] = []
+            path.write_text(json.dumps(value))
+        def background_changed(status, env):
+            Path(env['SWIFTWALL_BACKGROUND_LINK']).unlink()
+            Path(env['SWIFTWALL_BACKGROUND_LINK']).symlink_to(self.root / 'pictures/one.png')
+        for corrupt in (state_changed, background_changed):
+            with tempfile.TemporaryDirectory(prefix='rc-restart-', dir='/tmp') as temporary:
+                self.root = Path(temporary)
+                with self.assertRaises(smoke.SmokeError):
+                    self.lifecycle(corrupt)
+                self.assertIn('restart_state', self.evidence)
 
 
 TARGET_BYTES = bundle.TARGET.encode()
