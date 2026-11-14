@@ -1,13 +1,9 @@
-# Linux release bundles (local stable 0.2.0 preparation)
+# Linux release bundles (stable 0.2.0)
 
-This describes the release packaging contract, not an available stable release.
-Local implementation and local validation are complete; see the
-[validation record](STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
-This is not new stable musl artifact acceptance. The native
-GNU release binary has been built and reports `swiftwall 0.2.0`; **no stable musl
-release archive or checksum has been built or published.** The planned assets are
-`swiftwall-0.2.0-linux-x86_64.tar.gz` and `SHA256SUMS`; see the
-[planned quick install](SETUP.md#planned-stable-020-quick-install).
+This describes the release packaging contract for the published stable release.
+`SwiftWall v0.2.0` is live with the assets `swiftwall-0.2.0-linux-x86_64.tar.gz`
+and `SHA256SUMS`; see the [publication record](PUBLICATION_0.2.0.md) and the
+[quick install](SETUP.md#stable-020-quick-install).
 Prebuilt installation requires no Rust compiler, Cargo or repository clone.
 
 The workflow can create **drafts only**, on an explicit `publish=true` manual

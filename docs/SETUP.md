@@ -1,11 +1,7 @@
 # Simple local installation and maintenance
 
-This branch prepares stable 0.2.0 prebuilt distribution. Local implementation and
-local validation are complete; see the [validation record](STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
-This is not new stable musl artifact acceptance. A native GNU release binary has been
-built and reports `swiftwall 0.2.0`, but **no stable musl release archive or checksum
-has been built or published.** The quick-install commands below are planned for an
-approved, published stable bundle, not evidence of a download available today.
+Stable 0.2.0 is published as a prebuilt, statically linked Linux x86_64 (musl)
+engine with its `SHA256SUMS`; see the [publication record](PUBLICATION_0.2.0.md).
 The prebuilt installation requires no Rust compiler, Cargo or repository clone.
 Source installation remains an advanced alternative in
 [ADVANCED_INSTALL.md](ADVANCED_INSTALL.md).
@@ -23,10 +19,9 @@ immediately inside each folder. Subfolders are not included automatically. Netwo
 GVFS and FUSE folders are rejected for new collections. Existing settings are not
 replaced during an update.
 
-## Planned stable 0.2.0 quick install
+## Stable 0.2.0 quick install
 
-Only after stable 0.2.0 is approved and published, download
-`swiftwall-0.2.0-linux-x86_64.tar.gz` and `SHA256SUMS` from
+Download `swiftwall-0.2.0-linux-x86_64.tar.gz` and `SHA256SUMS` from
 [SwiftWall Releases](https://github.com/Henniedebruin/swiftwall/releases). Verify the
 archive before extracting or executing its setup helper:
 

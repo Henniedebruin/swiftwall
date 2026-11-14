@@ -5,15 +5,13 @@ Its **Manual setup** label remains legitimate: the marketplace installs plugin
 files, not the required companion daemon and user service. Listing verification
 covers the exact reviewed snapshot, not every later upstream commit or release.
 
-**Stable 0.2.0 is local preparation only.** Local implementation and local validation
-are complete; see the [validation record](STABLE_RELEASE_PLAN.md#completed-local-validation-and-remaining-artifact-acceptance).
-This is not new stable musl artifact acceptance. A native GNU release binary reports
-`swiftwall 0.2.0`; no stable musl release archive or checksum has been built or
-published.
-The [planned prebuilt quick install](SETUP.md#planned-stable-020-quick-install)
-will require no Rust compiler, Cargo or repository clone once approved assets are
-published. It does not reclassify marketplace eligibility or establish verification
-of the stable snapshot.
+**Stable 0.2.0 is published.** The GitHub Release `SwiftWall v0.2.0` carries the
+prebuilt Linux x86_64 musl engine and its `SHA256SUMS`; see the
+[publication record](PUBLICATION_0.2.0.md) and the
+[quick install](SETUP.md#stable-020-quick-install), which requires no Rust compiler,
+Cargo or repository clone. Publishing the release does not reclassify marketplace
+eligibility, does not by itself verify the newer upstream snapshot, and does not
+remove the **Manual setup** label.
 
 Official references:
 - <https://plugins.omarchy.org/publish.html>
@@ -37,7 +35,7 @@ SwiftWall is not just QML. The plugin connects to a separately built Rust daemon
 Installing the plugin files alone does **not** build, start or enable that daemon.
 No install hooks silently execute source code or enable a service.
 
-See [setup and recovery](SETUP.md) for the planned prebuilt path. Source/manual
+See [setup and recovery](SETUP.md) for the prebuilt install path. Source/manual
 installation remains an advanced alternative: follow the
 [engine installation guide](../packaging/INSTALL.md) and then the
 [plugin installation guide](../packaging/PLUGIN_INSTALL.md). These cover

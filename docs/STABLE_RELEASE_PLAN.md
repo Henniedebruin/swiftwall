@@ -1,5 +1,11 @@
 # SwiftWall 0.2.0 stable release plan — review draft
 
+> **Superseded.** This pre-acceptance plan was written before the stable artifact
+> was built and published. Stable 0.2.0 is now released: see
+> [PUBLICATION_0.2.0.md](PUBLICATION_0.2.0.md) and
+> [RELEASE_0.2.0_DRAFT.md](RELEASE_0.2.0_DRAFT.md). The statements below describe
+> the state at drafting time and are retained as a historical record.
+
 **Local implementation and local validation complete.** A native GNU
 release binary has been built and reports `swiftwall 0.2.0`. No stable musl release
 archive or checksum has been built or published. Further builds, commits,
